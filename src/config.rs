@@ -174,12 +174,20 @@ pub struct OutputSettings {
     pub after_save_command: String,
 }
 
+/// The document's own date (from the OCR text, else today) and the
+/// suggested name: "2026-08-19 Valley Medical Receipt".
+pub const DEFAULT_NAME_TEMPLATE: &str = "{doc_date} {suggested}";
+
+/// Earlier default templates, upgraded on load. A template the user typed
+/// themselves is never touched.
+const OLD_DEFAULT_NAME_TEMPLATES: [&str; 1] = ["{date} {suggested}"];
+
 impl Default for OutputSettings {
     fn default() -> Self {
         Self {
             format: OutputFormat::SearchablePdf,
             folder: PathBuf::new(),
-            name_template: "{date} {suggested}".into(),
+            name_template: DEFAULT_NAME_TEMPLATE.into(),
             save_mode: SaveMode::Ask,
             save_after_scan: false,
             clear_after_save: true,
@@ -315,6 +323,10 @@ impl Config {
                     if cfg.profiles.is_empty() {
                         cfg.profiles = Profile::builtin();
                     }
+                    if cfg.upgrade_defaults() {
+                        // Persist right away so the file matches what the app shows.
+                        let _ = cfg.save();
+                    }
                     cfg
                 }
                 Err(e) => {
@@ -338,6 +350,19 @@ impl Config {
         std::fs::write(&tmp, text)?;
         std::fs::rename(&tmp, &path)?;
         Ok(())
+    }
+
+    /// Move profiles still on an old default to the current one. Returns
+    /// whether anything changed.
+    fn upgrade_defaults(&mut self) -> bool {
+        let mut changed = false;
+        for p in &mut self.profiles {
+            if OLD_DEFAULT_NAME_TEMPLATES.contains(&p.output.name_template.as_str()) {
+                p.output.name_template = DEFAULT_NAME_TEMPLATE.into();
+                changed = true;
+            }
+        }
+        changed
     }
 
     pub fn profile(&self, name: &str) -> Option<&Profile> {
@@ -367,6 +392,19 @@ mod tests {
         let text = toml::to_string_pretty(&cfg).unwrap();
         let back: Config = toml::from_str(&text).unwrap();
         assert_eq!(cfg, back);
+    }
+
+    #[test]
+    fn upgrades_old_default_template_but_not_custom_ones() {
+        let mut cfg: Config = toml::from_str(
+            "[[profiles]]\nname = \"A\"\n[profiles.output]\nname_template = \"{date} {suggested}\"\n\
+             [[profiles]]\nname = \"B\"\n[profiles.output]\nname_template = \"{date} receipts/{title}\"\n",
+        )
+        .unwrap();
+        assert!(cfg.upgrade_defaults());
+        assert!(!cfg.upgrade_defaults(), "second pass is a no-op");
+        assert_eq!(cfg.profiles[0].output.name_template, DEFAULT_NAME_TEMPLATE);
+        assert_eq!(cfg.profiles[1].output.name_template, "{date} receipts/{title}");
     }
 
     #[test]

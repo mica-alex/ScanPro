@@ -149,7 +149,25 @@ const DOC_TYPES: &[(&str, &[&str])] = &[
     // Not "signature"/"agree": receipts and folios carry those too.
     ("Contract", &["agreement", "hereinafter", "the parties", "terms and conditions", "witnesseth", "whereas"]),
     ("Insurance", &["policy number", "policyholder", "insured", "premium", "coverage", "claim number"]),
-    ("Medical", &["patient", "diagnosis", "prescription", "explanation of benefits", "physician", "dob"]),
+    (
+        "Medical",
+        &[
+            "patient",
+            "diagnosis",
+            "prescription",
+            "explanation of benefits",
+            "physician",
+            "guarantor",
+            "office visit",
+            "copay",
+            "co-pay",
+            "date of service",
+            "provider",
+            "clinic",
+            "hospital",
+            "pharmacy",
+        ],
+    ),
     ("Quote", &["quotation", "estimate", "quote number", "valid until"]),
     ("Order", &["order confirmation", "purchase order", "order number", "packing slip", "shipped"]),
     ("Certificate", &["certificate", "hereby certify", "certifies that"]),
@@ -165,10 +183,12 @@ static ISO_DATE: LazyLock<Regex> =
 static NUM_DATE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b(\d{1,2})[-./](\d{1,2})[-./](\d{4}|\d{2})\b").unwrap());
 static MONTH_FIRST: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+((?:19|20)\d\d)\b").unwrap()
+    // "March 4th, 2026", "Aug 19 2026", "Aug-19-2026"
+    Regex::new(r"(?i)\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?[\s-]+(\d{1,2})(?:st|nd|rd|th)?,?[\s-]+((?:19|20)\d\d)\b").unwrap()
 });
 static DAY_FIRST: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(\d{1,2})(?:st|nd|rd|th)?\.?\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?,?\s+((?:19|20)\d\d)\b").unwrap()
+    // "7 Feb 2025", "19-Aug-2026", "19. August 2026"
+    Regex::new(r"(?i)\b(\d{1,2})(?:st|nd|rd|th)?\.?[\s-]+(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?,?[\s-]+((?:19|20)\d\d)\b").unwrap()
 });
 static NOT_A_TITLE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(@|www\.|https?:|\.com\b|\b(street|st\.|avenue|ave\.?|road|rd\.|suite|ste\.|p\.?\s?o\.? box|blvd|drive|dr\.|lane|floor)\b|\bpage \d|\btel\b|\bphone\b|\bfax\b|\(\d{3}\)|\d{3}[-. ]\d{3}[-. ]\d{4})").unwrap()
@@ -251,7 +271,7 @@ fn best_date(text: &str) -> Option<Date> {
 fn best_type(text: &str, heading: Option<&str>) -> Option<String> {
     let lower = text.to_lowercase();
     let heading = heading.map(str::to_lowercase).unwrap_or_default();
-    DOC_TYPES
+    let scores: Vec<(f64, &str)> = DOC_TYPES
         .iter()
         .map(|(name, words)| {
             let mut score: f64 = words.iter().map(|w| lower.matches(w).count().min(3) as f64).sum();
@@ -260,9 +280,22 @@ fn best_type(text: &str, heading: Option<&str>) -> Option<String> {
             }
             (score, *name)
         })
-        .filter(|(s, _)| *s >= 2.0)
-        .max_by(|a, b| a.0.total_cmp(&b.0))
-        .map(|(_, n)| n.to_string())
+        .collect();
+    let (_, best) = scores.iter().filter(|(s, _)| *s >= 2.0).max_by(|a, b| a.0.total_cmp(&b.0))?;
+    // A payment document that is clearly medical says so — "Medical
+    // Receipt" files and searches better than either word alone — whichever
+    // of the two scored higher.
+    let medical = scores.iter().any(|(s, n)| *n == "Medical" && *s >= 2.0);
+    let payment = scores
+        .iter()
+        .filter(|(s, n)| *s >= 2.0 && matches!(*n, "Receipt" | "Bill" | "Statement" | "Invoice"))
+        .max_by(|a, b| a.0.total_cmp(&b.0));
+    if let (true, Some((_, kind))) = (medical, payment)
+        && matches!(*best, "Medical" | "Receipt" | "Bill" | "Statement" | "Invoice")
+    {
+        return Some(format!("Medical {kind}"));
+    }
+    Some(best.to_string())
 }
 
 fn tidy_case(s: &str) -> String {
@@ -530,6 +563,43 @@ mod tests {
         let s = suggest_heuristic(&[&p]).unwrap();
         assert_eq!(s.title.as_deref(), Some("Harbor View Suites"));
         assert_eq!(s.doc_type.as_deref(), Some("Receipt"));
+    }
+
+    #[test]
+    fn names_a_medical_receipt_by_its_own_date() {
+        // Laid out like a real ES-300W scan of a medical receipt (contents
+        // made up): the receipt date sits by the patient block, the date of
+        // the visit it pays for further down in the line items.
+        let p = page(&[
+            ("Lakeside Family Clinic", 300.0, 45.0),
+            ("Guarantor Patient", 400.0, 30.0),
+            ("Jane Sample #100200 Jane Sample", 440.0, 35.0),
+            ("3/14/26", 500.0, 35.0),
+            ("Previous Balance", 750.0, 35.0),
+            ("Past Professional Services", 790.0, 35.0),
+            ("Acct #55501234 - Office Visit on 02/02/26 $120.00", 830.0, 35.0),
+            ("Total Paid", 950.0, 30.0),
+            ("$120.00", 1000.0, 70.0),
+            ("Visa x0000", 1200.0, 35.0),
+            ("Signature:", 1350.0, 35.0),
+            ("PATIENT COPY", 1480.0, 35.0),
+            ("Please keep this receipt for your records.", 1620.0, 35.0),
+        ]);
+        let s = suggest_heuristic(&[&p]).unwrap();
+        assert_eq!(s.doc_date, Some(Date::new(2026, 3, 14).unwrap()));
+        assert_eq!(s.doc_type.as_deref(), Some("Medical Receipt"));
+        assert_eq!(s.name, "Lakeside Family Clinic Medical Receipt");
+        let ctx = NameContext { suggestion: Some(&s), ..ctx(None) };
+        assert_eq!(
+            render(crate::config::DEFAULT_NAME_TEMPLATE, &ctx),
+            PathBuf::from("2026-03-14 Lakeside Family Clinic Medical Receipt")
+        );
+    }
+
+    #[test]
+    fn finds_hyphenated_month_name_dates() {
+        let dates: Vec<Date> = find_dates("Issued 19-Aug-2026, due Sep-18-2026").into_iter().map(|(_, d)| d).collect();
+        assert_eq!(dates, vec![Date::new(2026, 8, 19).unwrap(), Date::new(2026, 9, 18).unwrap()]);
     }
 
     #[test]
