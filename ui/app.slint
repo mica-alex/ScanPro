@@ -1,0 +1,597 @@
+// ScanPro main window. Widget style (Fluent / Cupertino) is chosen per OS in
+// build.rs and follows the system light/dark setting, so everything here
+// uses std-widgets and Palette colours rather than hard-coded ones.
+
+import {
+    Button, ComboBox, LineEdit, GroupBox, ScrollView, TabWidget, Slider, Switch,
+    Palette, Spinner, ProgressIndicator, StandardButton,
+} from "std-widgets.slint";
+
+export struct PageItem {
+    key: int,
+    number: int,
+    thumb: image,
+    // False while the page is still being stored/analysed.
+    ready: bool,
+    blank: bool,
+    // 0 = OCR off, 1 = pending, 2 = done, 3 = failed.
+    ocr: int,
+    // Width / height of the oriented page, for card layout.
+    aspect: float,
+}
+
+component Caption inherits Text {
+    font-size: 11px;
+    color: Palette.foreground.with-alpha(0.65);
+    wrap: word-wrap;
+}
+
+component Labeled inherits VerticalLayout {
+    in property <string> label;
+    spacing: 3px;
+    Caption { text: root.label; }
+    @children
+}
+
+component Badge inherits Rectangle {
+    in property <string> text;
+    in property <color> tint: Palette.accent-background;
+    border-radius: 4px;
+    background: root.tint.with-alpha(0.18);
+    height: label.preferred-height + 4px;
+    width: label.preferred-width + 10px;
+    label := Text {
+        text: root.text;
+        font-size: 10px;
+        color: root.tint;
+    }
+}
+
+component PageCard inherits Rectangle {
+    in property <PageItem> item;
+    in property <bool> selected;
+    callback clicked();
+    callback double-clicked();
+
+    border-radius: 8px;
+    background: root.selected ? Palette.accent-background.with-alpha(0.16) : (touch.has-hover ? Palette.foreground.with-alpha(0.05) : transparent);
+    border-width: root.selected ? 2px : 0px;
+    border-color: Palette.accent-background;
+
+    property <length> img-max-w: root.width - 20px;
+    property <length> img-max-h: root.height - 44px;
+    property <length> img-w: min(self.img-max-w, self.img-max-h * max(root.item.aspect, 0.1));
+    property <length> img-h: self.img-w / max(root.item.aspect, 0.1);
+
+    paper := Rectangle {
+        x: (root.width - root.img-w) / 2;
+        y: 10px + (root.img-max-h - root.img-h) / 2;
+        width: root.img-w;
+        height: root.img-h;
+        background: #ffffff;
+        drop-shadow-blur: 6px;
+        drop-shadow-color: #00000040;
+        drop-shadow-offset-y: 1px;
+        Image {
+            width: parent.width;
+            height: parent.height;
+            source: root.item.thumb;
+            image-fit: contain;
+        }
+        if !root.item.ready: Spinner {
+            indeterminate: true;
+            width: 28px;
+            height: 28px;
+        }
+        if root.item.blank: Rectangle {
+            background: #ffffffa0;
+            Text {
+                text: "Blank";
+                color: #555;
+                font-size: 12px;
+            }
+        }
+    }
+
+    HorizontalLayout {
+        y: root.height - 30px;
+        height: 22px;
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 4px;
+        alignment: center;
+        Text {
+            text: root.item.number;
+            vertical-alignment: center;
+            font-weight: 600;
+        }
+        if root.item.ocr == 1: Badge { text: "OCR…"; tint: Palette.foreground; y: 3px; }
+        if root.item.ocr == 2: Badge { text: "Text"; y: 3px; }
+        if root.item.ocr == 3: Badge { text: "No text"; tint: #c0392b; y: 3px; }
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+        double-clicked => { root.double-clicked(); }
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "ScanPro";
+    icon: @image-url("../assets/icons/128x128.png");
+    preferred-width: 1280px;
+    preferred-height: 820px;
+    min-width: 960px;
+    min-height: 600px;
+    background: Palette.background;
+
+    // ─── Devices & profiles ───────────────────────────────────────────────
+    in property <[string]> device-names;
+    in-out property <int> device-index;
+    in property <bool> discovering;
+    in property <[string]> profile-names;
+    in-out property <int> profile-index;
+
+    // ─── Scan settings (option lists depend on the device) ───────────────
+    in property <[string]> source-names;
+    in-out property <int> source-index;
+    in property <[string]> color-names;
+    in-out property <int> color-index;
+    in property <[string]> dpi-names;
+    in-out property <int> dpi-index;
+    in property <[string]> paper-names;
+    in-out property <int> paper-index;
+    in-out property <bool> skip-blank;
+    in-out property <float> blank-threshold;
+
+    in-out property <bool> ocr-enabled;
+    in property <[string]> engine-names;
+    in-out property <int> engine-index;
+    in-out property <string> ocr-languages;
+    in-out property <bool> fix-orientation;
+
+    // ─── Output ───────────────────────────────────────────────────────────
+    in property <[string]> format-names;
+    in-out property <int> format-index;
+    in property <string> folder;
+    in-out property <string> name-template;
+    in-out property <string> file-name;
+    in-out property <bool> auto-save;
+    in-out property <bool> save-after-scan;
+    in-out property <bool> clear-after-save;
+    in-out property <bool> open-after-save;
+    in-out property <bool> reveal-after-save;
+    in-out property <string> after-save-command;
+    in-out property <float> jpeg-quality;
+
+    // ─── Naming ───────────────────────────────────────────────────────────
+    in-out property <bool> suggest-names;
+    in-out property <bool> use-llm;
+    in property <[string]> llm-api-names;
+    in-out property <int> llm-api-index;
+    in-out property <string> llm-endpoint;
+    in-out property <string> llm-model;
+    in property <bool> suggesting;
+
+    // ─── Pages & state ────────────────────────────────────────────────────
+    in property <[PageItem]> pages;
+    in-out property <int> selected: -1;
+    in property <image> preview;
+    in property <bool> preview-loading;
+    in-out property <bool> show-preview: true;
+    in property <bool> scanning;
+    in property <bool> saving;
+    in property <string> status;
+    in property <float> progress: -1;
+    in property <string> last-saved;
+
+    // ─── Callbacks ────────────────────────────────────────────────────────
+    callback refresh-devices();
+    callback device-selected(int);
+    callback profile-selected(int);
+    callback save-profile-as(string);
+    callback delete-profile();
+    // A scan setting changed: persist it into the active profile.
+    callback settings-changed();
+    // target: 0 = append, 1 = replace selected page, 2 = insert after selected.
+    callback scan(int);
+    callback stop-scan();
+    callback import-files();
+    callback select-page(int);
+    callback rotate-page(int, int);
+    callback move-page(int, int);
+    callback delete-page(int);
+    callback clear-pages();
+    callback suggest-name();
+    callback name-edited();
+    callback choose-folder();
+    callback open-folder();
+    callback reveal-last();
+    callback save();
+    callback test-llm();
+
+    property <bool> has-selection: root.selected >= 0 && root.selected < root.pages.length;
+
+    MenuBar {
+        Menu {
+            title: "File";
+            MenuItem { title: "Scan"; enabled: !root.scanning; activated => { root.scan(0); } }
+            MenuItem { title: "Import Images…"; activated => { root.import-files(); } }
+            MenuSeparator {}
+            MenuItem { title: "Save"; enabled: root.pages.length > 0 && !root.saving; activated => { root.save(); } }
+            MenuItem { title: "Show Output Folder"; activated => { root.open-folder(); } }
+            MenuSeparator {}
+            MenuItem { title: "Clear All Pages"; enabled: root.pages.length > 0 && !root.scanning; activated => { root.clear-pages(); } }
+        }
+        Menu {
+            title: "Page";
+            MenuItem { title: "Rotate Left"; enabled: root.has-selection; activated => { root.rotate-page(root.selected, -90); } }
+            MenuItem { title: "Rotate Right"; enabled: root.has-selection; activated => { root.rotate-page(root.selected, 90); } }
+            MenuItem { title: "Rotate 180°"; enabled: root.has-selection; activated => { root.rotate-page(root.selected, 180); } }
+            MenuSeparator {}
+            MenuItem { title: "Move Earlier"; enabled: root.has-selection; activated => { root.move-page(root.selected, -1); } }
+            MenuItem { title: "Move Later"; enabled: root.has-selection; activated => { root.move-page(root.selected, 1); } }
+            MenuSeparator {}
+            MenuItem { title: "Rescan This Page"; enabled: root.has-selection && !root.scanning; activated => { root.scan(1); } }
+            MenuItem { title: "Insert Scan After This Page"; enabled: root.has-selection && !root.scanning; activated => { root.scan(2); } }
+            MenuSeparator {}
+            MenuItem { title: "Delete Page"; enabled: root.has-selection; activated => { root.delete-page(root.selected); } }
+        }
+        Menu {
+            title: "View";
+            MenuItem { title: root.show-preview ? "Hide Preview" : "Show Preview"; activated => { root.show-preview = !root.show-preview; } }
+        }
+    }
+
+    save-profile-popup := PopupWindow {
+        x: (root.width - 320px) / 2;
+        y: 120px;
+        width: 320px;
+        close-policy: close-on-click-outside;
+        Rectangle {
+            background: Palette.alternate-background;
+            border-radius: 10px;
+            drop-shadow-blur: 18px;
+            drop-shadow-color: #00000050;
+            VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
+                Text { text: "Save settings as a new profile"; font-weight: 600; }
+                new-profile-name := LineEdit {
+                    placeholder-text: "Profile name";
+                    accepted => {
+                        if self.text != "" { root.save-profile-as(self.text); self.text = ""; save-profile-popup.close(); }
+                    }
+                }
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 8px;
+                    Button { text: "Cancel"; clicked => { save-profile-popup.close(); } }
+                    Button {
+                        text: "Save";
+                        primary: true;
+                        enabled: new-profile-name.text != "";
+                        clicked => { root.save-profile-as(new-profile-name.text); new-profile-name.text = ""; save-profile-popup.close(); }
+                    }
+                }
+            }
+        }
+    }
+
+    VerticalLayout {
+        // ─── Toolbar ──────────────────────────────────────────────────────
+        HorizontalLayout {
+            padding: 10px;
+            spacing: 8px;
+            ComboBox {
+                horizontal-stretch: 1;
+                min-width: 220px;
+                model: root.device-names.length > 0 ? root.device-names : [root.discovering ? "Looking for scanners…" : "No scanners found"];
+                current-index <=> root.device-index;
+                enabled: root.device-names.length > 0 && !root.scanning;
+                selected => { root.device-selected(self.current-index); }
+            }
+            Button {
+                text: root.discovering ? "Searching…" : "Refresh";
+                enabled: !root.discovering && !root.scanning;
+                clicked => { root.refresh-devices(); }
+            }
+            Rectangle { width: 12px; }
+            Caption { text: "Profile"; vertical-alignment: center; }
+            ComboBox {
+                min-width: 220px;
+                max-width: 300px;
+                model: root.profile-names;
+                current-index <=> root.profile-index;
+                enabled: !root.scanning;
+                selected => { root.profile-selected(self.current-index); }
+            }
+            Rectangle { width: 12px; }
+            if !root.scanning: Button {
+                text: "Scan";
+                primary: true;
+                min-width: 110px;
+                enabled: root.device-names.length > 0;
+                clicked => { root.scan(0); }
+            }
+            if root.scanning: Button {
+                text: "Stop";
+                min-width: 110px;
+                clicked => { root.stop-scan(); }
+            }
+        }
+
+        Rectangle { height: 1px; background: Palette.border; }
+
+        HorizontalLayout {
+            vertical-stretch: 1;
+
+            // ─── Settings panel ───────────────────────────────────────────
+            Rectangle {
+                width: 300px;
+                background: Palette.alternate-background;
+                TabWidget {
+                    Tab {
+                        title: "Scan";
+                        ScrollView {
+                            VerticalLayout {
+                                padding: 12px;
+                                spacing: 10px;
+                                alignment: start;
+                                Labeled {
+                                    label: "Source";
+                                    ComboBox { model: root.source-names; current-index <=> root.source-index; selected => { root.settings-changed(); } }
+                                }
+                                Labeled {
+                                    label: "Color";
+                                    ComboBox { model: root.color-names; current-index <=> root.color-index; selected => { root.settings-changed(); } }
+                                }
+                                Labeled {
+                                    label: "Resolution";
+                                    ComboBox { model: root.dpi-names; current-index <=> root.dpi-index; selected => { root.settings-changed(); } }
+                                }
+                                Labeled {
+                                    label: "Paper size";
+                                    ComboBox { model: root.paper-names; current-index <=> root.paper-index; selected => { root.settings-changed(); } }
+                                }
+                                Switch { text: "Skip blank pages"; checked <=> root.skip-blank; toggled => { root.settings-changed(); } }
+                                if root.skip-blank: Labeled {
+                                    label: "Blank if less than " + round(root.blank-threshold * 100) / 100 + "% of the page has ink";
+                                    Slider { minimum: 0.02; maximum: 2.0; value <=> root.blank-threshold; released => { root.settings-changed(); } }
+                                }
+                                Rectangle { height: 6px; }
+                                Switch { text: "Recognize text (OCR)"; checked <=> root.ocr-enabled; toggled => { root.settings-changed(); } }
+                                if root.ocr-enabled: Labeled {
+                                    label: "Engine";
+                                    ComboBox { model: root.engine-names; current-index <=> root.engine-index; selected => { root.settings-changed(); } }
+                                }
+                                if root.ocr-enabled: Switch { text: "Turn upside-down pages"; checked <=> root.fix-orientation; toggled => { root.settings-changed(); } }
+                                if root.ocr-enabled: Labeled {
+                                    label: "Languages (e.g. en-US, de-DE; blank = automatic)";
+                                    LineEdit { text <=> root.ocr-languages; edited => { root.settings-changed(); } }
+                                }
+                                Rectangle { height: 10px; }
+                                Caption { text: "Settings are saved to the selected profile as you change them."; }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    Button { text: "Save as new profile…"; clicked => { save-profile-popup.show(); } }
+                                    Button { text: "Delete"; enabled: root.profile-names.length > 1; clicked => { root.delete-profile(); } }
+                                }
+                            }
+                        }
+                    }
+                    Tab {
+                        title: "Output";
+                        ScrollView {
+                            VerticalLayout {
+                                padding: 12px;
+                                spacing: 10px;
+                                alignment: start;
+                                Labeled {
+                                    label: "Save to folder";
+                                    Text { text: root.folder; wrap: char-wrap; font-size: 12px; }
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        Button { text: "Choose…"; clicked => { root.choose-folder(); } }
+                                        Button { text: "Open"; clicked => { root.open-folder(); } }
+                                    }
+                                }
+                                Labeled {
+                                    label: "File name template";
+                                    LineEdit { text <=> root.name-template; edited => { root.settings-changed(); } }
+                                    Caption { text: "{suggested} {title} {type} {doc_date} {date} {time} {counter:4} {pages} {profile} {scanner}. Use / for subfolders, e.g. {type}/{doc_date} {title}."; }
+                                }
+                                Switch { text: "Save without asking"; checked <=> root.auto-save; toggled => { root.settings-changed(); } }
+                                Caption { text: root.auto-save ? "Each document is saved straight into the folder above, named by the template — ideal for back-to-back scanning." : "A save dialog opens in the folder above with the suggested name."; }
+                                if root.auto-save: Switch { text: "Save as soon as a scan finishes"; checked <=> root.save-after-scan; toggled => { root.settings-changed(); } }
+                                Switch { text: "Clear pages after saving"; checked <=> root.clear-after-save; toggled => { root.settings-changed(); } }
+                                Switch { text: "Open file after saving"; checked <=> root.open-after-save; toggled => { root.settings-changed(); } }
+                                Switch { text: "Show in folder after saving"; checked <=> root.reveal-after-save; toggled => { root.settings-changed(); } }
+                                Labeled {
+                                    label: "Image quality: " + round(root.jpeg-quality);
+                                    Slider { minimum: 40; maximum: 100; value <=> root.jpeg-quality; released => { root.settings-changed(); } }
+                                }
+                                Labeled {
+                                    label: "Run after saving (optional)";
+                                    LineEdit { placeholder-text: "e.g. cp {path} ~/Dropbox/Inbox"; text <=> root.after-save-command; edited => { root.settings-changed(); } }
+                                    Caption { text: "Shell command; {path} is the saved file, {folder} its folder."; }
+                                }
+                            }
+                        }
+                    }
+                    Tab {
+                        title: "Naming";
+                        ScrollView {
+                            VerticalLayout {
+                                padding: 12px;
+                                spacing: 10px;
+                                alignment: start;
+                                Switch { text: "Suggest names from the text"; checked <=> root.suggest-names; toggled => { root.settings-changed(); } }
+                                Caption { text: "Finds the sender or heading, the document type and its date, all on this computer."; }
+                                if root.suggest-names: Switch { text: "Use a local AI model"; checked <=> root.use-llm; toggled => { root.settings-changed(); } }
+                                if root.suggest-names && root.use-llm: VerticalLayout {
+                                    spacing: 10px;
+                                    Caption { text: "Works with Ollama, LM Studio, llama.cpp or any OpenAI-compatible server on your machine. Falls back to the built-in suggestions if it isn't running."; }
+                                    Labeled {
+                                        label: "Server type";
+                                        ComboBox { model: root.llm-api-names; current-index <=> root.llm-api-index; selected => { root.settings-changed(); } }
+                                    }
+                                    Labeled {
+                                        label: "Address";
+                                        LineEdit { text <=> root.llm-endpoint; edited => { root.settings-changed(); } }
+                                    }
+                                    Labeled {
+                                        label: "Model";
+                                        LineEdit { text <=> root.llm-model; edited => { root.settings-changed(); } }
+                                    }
+                                    Button { text: "Test connection"; clicked => { root.test-llm(); } }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Rectangle { width: 1px; background: Palette.border; }
+
+            // ─── Pages ────────────────────────────────────────────────────
+            VerticalLayout {
+                horizontal-stretch: 1;
+                HorizontalLayout {
+                    padding: 8px;
+                    spacing: 6px;
+                    Button { text: "↺"; enabled: root.has-selection; clicked => { root.rotate-page(root.selected, -90); } }
+                    Button { text: "↻"; enabled: root.has-selection; clicked => { root.rotate-page(root.selected, 90); } }
+                    Button { text: "◀"; enabled: root.has-selection && root.selected > 0; clicked => { root.move-page(root.selected, -1); } }
+                    Button { text: "▶"; enabled: root.has-selection && root.selected < root.pages.length - 1; clicked => { root.move-page(root.selected, 1); } }
+                    Button { text: "Rescan page"; enabled: root.has-selection && !root.scanning; clicked => { root.scan(1); } }
+                    Button { text: "Insert scan after"; enabled: root.has-selection && !root.scanning; clicked => { root.scan(2); } }
+                    Button { text: "Delete"; enabled: root.has-selection; clicked => { root.delete-page(root.selected); } }
+                    Rectangle { horizontal-stretch: 1; }
+                    Button { text: "Import…"; clicked => { root.import-files(); } }
+                    Button { text: "Clear all"; enabled: root.pages.length > 0 && !root.scanning; clicked => { root.clear-pages(); } }
+                }
+                HorizontalLayout {
+                    vertical-stretch: 1;
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        grid := ScrollView {
+                            property <length> cell-w: 156px;
+                            property <length> cell-h: 216px;
+                            property <int> cols: max(1, floor(self.visible-width / self.cell-w));
+                            property <length> inset: (self.visible-width - self.cols * self.cell-w) / 2;
+                            content-width: self.visible-width;
+                            content-height: max(self.visible-height, ceil(root.pages.length / self.cols) * self.cell-h + 16px);
+                            for page[i] in root.pages: PageCard {
+                                x: grid.inset + mod(i, grid.cols) * grid.cell-w;
+                                y: 8px + floor(i / grid.cols) * grid.cell-h;
+                                width: grid.cell-w - 8px;
+                                height: grid.cell-h - 8px;
+                                item: page;
+                                selected: i == root.selected;
+                                clicked => { root.select-page(i); }
+                                double-clicked => { root.select-page(i); root.show-preview = true; }
+                            }
+                        }
+                        if root.pages.length == 0: VerticalLayout {
+                            alignment: center;
+                            spacing: 8px;
+                            Text {
+                                text: root.scanning ? "Waiting for the first page…" : "Load paper and press Scan";
+                                font-size: 20px;
+                                horizontal-alignment: center;
+                                color: Palette.foreground.with-alpha(0.55);
+                            }
+                            Caption {
+                                text: "Pages appear here as they're scanned. Select a page to rotate, reorder, rescan or delete it.";
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+                    if root.show-preview && root.has-selection: Rectangle {
+                        width: 40%;
+                        background: Palette.alternate-background;
+                        border-width: 0px;
+                        Rectangle { x: 0; width: 1px; background: Palette.border; }
+                        Image {
+                            x: 16px;
+                            y: 16px;
+                            width: parent.width - 32px;
+                            height: parent.height - 32px;
+                            source: root.preview;
+                            image-fit: contain;
+                        }
+                        if root.preview-loading: Spinner { indeterminate: true; width: 36px; height: 36px; }
+                    }
+                }
+            }
+        }
+
+        Rectangle { height: 1px; background: Palette.border; }
+
+        // ─── Save bar ─────────────────────────────────────────────────────
+        HorizontalLayout {
+            padding: 10px;
+            spacing: 8px;
+            Caption { text: "Name"; vertical-alignment: center; }
+            LineEdit {
+                horizontal-stretch: 1;
+                text <=> root.file-name;
+                placeholder-text: "Suggested from the text once OCR finishes";
+                edited => { root.name-edited(); }
+                accepted => { root.save(); }
+            }
+            Button {
+                text: root.suggesting ? "Suggesting…" : "Suggest";
+                enabled: root.pages.length > 0 && !root.suggesting;
+                clicked => { root.suggest-name(); }
+            }
+            ComboBox {
+                min-width: 190px;
+                max-width: 220px;
+                model: root.format-names;
+                current-index <=> root.format-index;
+                selected => { root.settings-changed(); }
+            }
+            Button {
+                text: root.saving ? "Saving…" : (root.auto-save ? "Save to Folder" : "Save…");
+                primary: true;
+                min-width: 120px;
+                enabled: root.pages.length > 0 && !root.saving;
+                clicked => { root.save(); }
+            }
+        }
+
+        // ─── Status bar ───────────────────────────────────────────────────
+        Rectangle {
+            height: 26px;
+            background: Palette.alternate-background;
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                spacing: 10px;
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.status;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                if root.last-saved != "": Text {
+                    text: "Show last saved";
+                    font-size: 12px;
+                    color: Palette.accent-background;
+                    vertical-alignment: center;
+                    TouchArea { mouse-cursor: pointer; clicked => { root.reveal-last(); } }
+                }
+                if root.progress >= 0: ProgressIndicator {
+                    width: 140px;
+                    height: 6px;
+                    y: 10px;
+                    progress: root.progress;
+                    indeterminate: root.progress == 0;
+                }
+            }
+        }
+    }
+}

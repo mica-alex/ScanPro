@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Merged into the bundle's generated Info.plist by cargo-packager. -->
+<plist version="1.0">
+<dict>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.productivity</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSRequiresAquaSystemAppearance</key>
+    <false/>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>ScanPro looks for network scanners (AirScan/eSCL) on your local network.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_uscan._tcp</string>
+        <string>_uscans._tcp</string>
+    </array>
+</dict>
+</plist>

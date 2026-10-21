@@ -1,0 +1,37 @@
+# ─── Rust / Cargo ──────────────────────────────────────────────────────────
+/target/
+# Packaged installers (cargo-packager output)
+/dist/
+
+# ─── IDE ───────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.iml
+
+# ─── OS cruft ──────────────────────────────────────────────────────────────
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ─── Logs and temp ─────────────────────────────────────────────────────────
+# Anchored: macOS filesystems are case-insensitive, so an unanchored `logs/`
+# would also swallow any source folder named `Logs/`.
+*.log
+/logs/
+*.tmp
+*~
+
+# ─── Secrets (keep it this way) ────────────────────────────────────────────
+*.env
+.env.*
+*credentials*
+
+# ─── Claude local state ────────────────────────────────────────────────────
+.claude/settings.local.json
+
+# ─── Agent working notes / implementation plans ────────────────────────────
+# Local scratch by design — never committed.
+docs/agent-plans/
+
+# ─── Local scratch / sample scans ──────────────────────────────────────────
+/scratch/
