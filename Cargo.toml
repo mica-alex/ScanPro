@@ -106,7 +106,7 @@ opt-level = 3
 # `cargo packager --release` on each OS produces that OS's installers.
 [package.metadata.packager]
 product-name = "ScanPro"
-identifier = "com.hawka97.scanpro"
+identifier = "com.mica-alex.scanpro"
 category = "Productivity"
 copyright = "Copyright © 2026 Alex H"
 description = "Scan paper to searchable PDFs and more, with any scanner."

@@ -27,10 +27,9 @@ pub struct OcrsEngine {
     engine: ocrs::OcrEngine,
 }
 
-/// `<app data>/models/`, e.g. `~/Library/Application Support/com.hawka97.ScanPro/models`.
+/// `<app data>/models/`, e.g. `~/Library/Application Support/com.mica-alex.ScanPro/models`.
 pub fn models_dir() -> Result<PathBuf> {
-    let dirs = directories::ProjectDirs::from("com", "hawka97", "ScanPro")
-        .ok_or_else(|| anyhow!("no home directory to store OCR models in"))?;
+    let dirs = crate::config::project_dirs().ok_or_else(|| anyhow!("no home directory to store OCR models in"))?;
     Ok(dirs.data_dir().join("models"))
 }
 

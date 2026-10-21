@@ -15,7 +15,7 @@ use crate::ocr::EngineKind;
 use crate::scanner::ScanSettings;
 
 pub fn project_dirs() -> Option<directories::ProjectDirs> {
-    directories::ProjectDirs::from("com", "hawka97", "ScanPro")
+    directories::ProjectDirs::from("com", "mica-alex", "ScanPro")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -300,6 +300,7 @@ impl Default for Config {
 impl Config {
     pub fn path() -> Option<PathBuf> {
         std::env::var_os("SCANPRO_CONFIG")
+            .filter(|v| !v.is_empty())
             .map(PathBuf::from)
             .or_else(|| project_dirs().map(|d| d.config_dir().join("config.toml")))
     }
