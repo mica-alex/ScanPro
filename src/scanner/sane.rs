@@ -541,6 +541,18 @@ impl SaneDevice {
     }
 }
 
+/// Normalise a `sane_start` status. The epsonds backend (ES-300W) reports
+/// an *empty* feeder as `STATUS_JAMMED` when a scan starts, so on the first
+/// sheet that means "load paper". Mid-batch, a jam is taken at its word.
+fn start_status(status: Status, pages_so_far: usize, source: Source, device_id: &str) -> Status {
+    let empty_reported_as_jam = device_id.starts_with("sane:epsonds:");
+    if status == STATUS_JAMMED && pages_so_far == 0 && source.is_feeder() && empty_reported_as_jam {
+        STATUS_NO_DOCS
+    } else {
+        status
+    }
+}
+
 /// Map our [`Source`] onto the backend's own source names. Returns the name
 /// and whether a separate `duplex` bool option must be switched on.
 fn pick_source(list: &[String], source: Source) -> Option<(String, bool)> {
@@ -691,7 +703,7 @@ impl Device for SaneDevice {
                     unsafe { (s.api.cancel)(self.handle) };
                     break;
                 }
-                let st = unsafe { (s.api.start)(self.handle) };
+                let st = start_status(unsafe { (s.api.start)(self.handle) }, count, settings.source, &self.info.id);
                 if st == STATUS_NO_DOCS && count > 0 {
                     unsafe { (s.api.cancel)(self.handle) };
                     break;
@@ -751,6 +763,17 @@ mod tests {
         assert_eq!(pick_mode(&list, ColorMode::BlackWhite).as_deref(), Some("Lineart"));
         assert_eq!(pick_mode(&list, ColorMode::Gray).as_deref(), Some("Gray"));
         assert_eq!(pick_mode(&list, ColorMode::Color).as_deref(), Some("Color"));
+    }
+
+    #[test]
+    fn epsonds_empty_feeder_jam_means_load_paper() {
+        let id = "sane:epsonds:libusb:002:001";
+        assert_eq!(start_status(STATUS_JAMMED, 0, Source::FeederDuplex, id), STATUS_NO_DOCS);
+        // A jam after pages have fed is real.
+        assert_eq!(start_status(STATUS_JAMMED, 3, Source::Feeder, id), STATUS_JAMMED);
+        // Other backends keep reporting jams.
+        assert_eq!(start_status(STATUS_JAMMED, 0, Source::Feeder, "sane:fujitsu:libusb:001:004"), STATUS_JAMMED);
+        assert_eq!(start_status(STATUS_GOOD, 0, Source::Feeder, id), STATUS_GOOD);
     }
 
     #[test]
