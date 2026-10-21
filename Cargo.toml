@@ -117,6 +117,10 @@ icons = ["assets/icons/32x32.png", "assets/icons/128x128.png", "assets/icons/256
 
 [package.metadata.packager.macos]
 minimum-system-version = "12.0"
+# Ad-hoc ("-") signature: seals the whole bundle so it runs cleanly on this
+# Mac. Replace with a Developer ID identity to distribute (needs notarizing).
+signing-identity = "-"
+entitlements = "assets/macos/entitlements.plist"
 info-plist-path = "assets/macos/Info.plist"
 
 [package.metadata.packager.deb]

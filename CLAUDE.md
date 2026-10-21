@@ -99,6 +99,12 @@ use it for manual testing so the real one isn't touched.
    backend (ICA on macOS) on the calling thread for this reason.
 7. **JPEG pages pass straight into the PDF** (DCTDecode) when unrotated. Don't
    add a decode/re-encode step to that path.
+8. **The macOS bundle needs `disable-library-validation`.** cargo-packager
+   signs with the hardened runtime, which otherwise refuses to `dlopen`
+   Homebrew's libsane. SANE then vanishes silently: the installed app finds
+   no scanners while `cargo run` works fine. Keep
+   `assets/macos/entitlements.plist` wired up in `Cargo.toml`, and test
+   scanner discovery from the *installed* app after packaging changes.
 
 ## Conventions
 
