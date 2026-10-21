@@ -50,7 +50,14 @@ pub fn suggest(pages: &[Page], profile: &Profile) -> Option<Suggestion> {
         return None;
     }
     let ocr: Vec<&ocr::OcrPage> = pages.iter().filter_map(|p| p.ocr.as_deref()).collect();
-    naming::suggest(&ocr, &profile.naming)
+    // Only render page 1 when a vision mode will actually use it.
+    let naming = &profile.naming;
+    let image = (naming.use_llm && naming.llm_input.wants_image())
+        .then(|| pages.first())
+        .flatten()
+        .and_then(|p| p.load().ok())
+        .and_then(|img| crate::llm::page_jpeg(&img).ok());
+    naming::suggest(&ocr, naming, image.as_deref())
 }
 
 /// The name (relative path, no extension) the template produces.

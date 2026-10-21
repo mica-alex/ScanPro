@@ -15,8 +15,10 @@ use anyhow::Result;
 use image::RgbaImage;
 use slint::{ComponentHandle, Model, ModelRc, SharedPixelBuffer, SharedString, VecModel};
 
+use scanpro::config::LlmInput;
 use scanpro::config::{Config, LlmApi, OutputFormat, Profile, SaveMode};
 use scanpro::job;
+use scanpro::llm;
 use scanpro::naming::Suggestion;
 use scanpro::ocr::{self, EngineKind, OcrPage};
 use scanpro::pipeline::{self, Page, PageStore};
@@ -84,6 +86,9 @@ struct State {
     ocr_done: usize,
     /// The launch-time OCR warm-up is still running; queued pages wait on it.
     ocr_warming: bool,
+    /// Models the naming server reported; the dropdown indexes into this.
+    llm_models: Vec<llm::ModelInfo>,
+    llm_list_generation: u64,
     message: String,
     last_saved: Option<PathBuf>,
 }
@@ -175,6 +180,8 @@ pub fn run(files: Vec<PathBuf>) -> Result<()> {
         ocr_total: 0,
         ocr_done: 0,
         ocr_warming: false,
+        llm_models: Vec::new(),
+        llm_list_generation: 0,
         message: "Ready".into(),
         last_saved: None,
     };
@@ -182,7 +189,8 @@ pub fn run(files: Vec<PathBuf>) -> Result<()> {
     ui.set_paper_names(strings(PaperSize::ALL.map(|p| p.label())));
     ui.set_format_names(strings(OutputFormat::ALL.map(|f| f.label())));
     ui.set_engine_names(strings(state.engines.iter().map(|e| e.label())));
-    ui.set_llm_api_names(strings(["Ollama", "OpenAI-compatible (LM Studio, llama.cpp…)"]));
+    ui.set_llm_api_names(strings(LlmApi::ALL.map(|a| a.label())));
+    ui.set_llm_input_names(strings(LlmInput::ALL.map(|i| i.label())));
     UI.with(|u| *u.borrow_mut() = Some(ui.as_weak()));
     STATE.with(|s| *s.borrow_mut() = Some(state));
     with_state(|ui, s| {
@@ -195,6 +203,7 @@ pub fn run(files: Vec<PathBuf>) -> Result<()> {
     wire(&ui);
     refresh_devices();
     warm_up_ocr();
+    with_state(refresh_llm_models);
     if !files.is_empty() {
         with_state(|ui, s| import(ui, s, files));
     }
@@ -241,6 +250,9 @@ fn wire(ui: &AppWindow) {
                 if !s.name_manual {
                     reset_name(ui, s);
                 }
+                s.llm_models.clear();
+                ui.set_llm_model_names(strings(Vec::<String>::new()));
+                refresh_llm_models(ui, s);
             }
         });
     });
@@ -274,30 +286,55 @@ fn wire(ui: &AppWindow) {
             apply_profile(ui, s);
         });
     });
-    ui.on_settings_changed(|| {
+    ui.on_settings_changed(|| with_state(settings_changed).unwrap_or(()));
+    ui.on_llm_api_changed(|| {
         with_state(|ui, s| {
-            let before = s.profile.clone();
-            s.profile = read_profile(ui, s);
-            s.config.upsert(s.profile.clone());
-            if let Err(e) = s.config.save() {
-                s.message = format!("Couldn't save settings: {e:#}");
-                update_status(ui, s);
+            // Follow the server type with its usual address, unless the user
+            // typed their own.
+            let typed = ui.get_llm_endpoint().trim().to_string();
+            let is_a_default = typed.is_empty() || LlmApi::ALL.iter().any(|a| llm::default_endpoint(*a) == typed);
+            if is_a_default {
+                let api = LlmApi::ALL[(ui.get_llm_api_index().max(0) as usize).min(LlmApi::ALL.len() - 1)];
+                ui.set_llm_endpoint(llm::default_endpoint(api).into());
             }
-            if before.output.name_template != s.profile.output.name_template && !s.name_manual {
-                reset_name(ui, s);
+            s.llm_models.clear();
+            settings_changed(ui, s);
+            refresh_llm_models(ui, s);
+        });
+    });
+    ui.on_refresh_llm_models(|| {
+        with_state(|ui, s| {
+            settings_changed(ui, s);
+            refresh_llm_models(ui, s);
+        });
+    });
+    ui.on_llm_model_selected(|i| {
+        with_state(|ui, s| {
+            if let Some(m) = s.llm_models.get(i as usize) {
+                ui.set_llm_model(m.id.clone().into());
             }
-            // Turning OCR on (or switching engine) should cover pages already scanned.
-            if s.profile.ocr != before.ocr {
-                for e in &mut s.entries {
-                    if let Some(p) = &mut e.page
-                        && (s.profile.ocr.engine != before.ocr.engine
-                            || s.profile.ocr.languages != before.ocr.languages)
-                    {
-                        p.ocr = None;
-                    }
-                }
-                queue_missing_ocr(ui, s);
-            }
+            settings_changed(ui, s);
+        });
+    });
+    ui.on_load_llm_model(|| {
+        with_state(|ui, s| {
+            let n = read_profile(ui, s).naming;
+            ui.set_llm_busy(true);
+            s.message = format!("Loading {}…", n.llm_model);
+            update_status(ui, s);
+            std::thread::spawn(move || {
+                let result = llm::Client::new(n.llm_api, &n.llm_endpoint).ensure_loaded(&n.llm_model);
+                post(move |ui, s| {
+                    ui.set_llm_busy(false);
+                    s.message = match result {
+                        Ok(secs) if secs > 0.0 => format!("Loaded {} in {secs:.1} s", n.llm_model),
+                        Ok(_) => format!("{} is loaded", n.llm_model),
+                        Err(e) => format!("Couldn't load the model: {e:#}"),
+                    };
+                    update_status(ui, s);
+                    refresh_llm_models(ui, s);
+                });
+            });
         });
     });
     ui.on_scan(|target| {
@@ -424,9 +461,11 @@ fn wire(ui: &AppWindow) {
     ui.on_test_llm(|| {
         with_state(|ui, s| {
             let settings = read_profile(ui, s).naming;
+            ui.set_llm_busy(true);
             s.message = format!("Asking {}…", settings.llm_model);
             update_status(ui, s);
             std::thread::spawn(move || {
+                // An invented sample; real documents never go in here.
                 let sample = OcrPage {
                     width: 1000,
                     height: 1000,
@@ -446,13 +485,25 @@ fn wire(ui: &AppWindow) {
                     })
                     .collect(),
                 };
-                let msg = match scanpro::naming::suggest_llm(&[&sample], &settings) {
-                    Ok(s) => format!("The model works — it named a sample invoice “{}”", s.name),
-                    Err(e) => format!("Couldn't reach the model: {e:#}"),
+                let msg = match scanpro::naming::suggest_llm(&[&sample], &settings, None, None) {
+                    Ok((s, stats)) => {
+                        let load = if stats.load_secs > 0.0 {
+                            format!(" (after loading it in {:.1} s)", stats.load_secs)
+                        } else {
+                            String::new()
+                        };
+                        format!(
+                            "It works: {} named a sample invoice “{}” in {:.1} s{load}",
+                            settings.llm_model, s.name, stats.answer_secs
+                        )
+                    }
+                    Err(e) => format!("The model didn't answer: {e:#}"),
                 };
                 post(move |ui, s| {
+                    ui.set_llm_busy(false);
                     s.message = msg;
                     update_status(ui, s);
+                    refresh_llm_models(ui, s);
                 });
             });
         });
@@ -493,6 +544,118 @@ fn warm_up_ocr() {
             Err(e) => log::warn!("OCR engine unavailable: {e:#}"),
         }
         done();
+    });
+}
+
+/// A setting changed in the UI: persist it into the active profile and
+/// react to what changed.
+fn settings_changed(ui: &AppWindow, s: &mut State) {
+    let before = s.profile.clone();
+    s.profile = read_profile(ui, s);
+    s.config.upsert(s.profile.clone());
+    if let Err(e) = s.config.save() {
+        s.message = format!("Couldn't save settings: {e:#}");
+        update_status(ui, s);
+    }
+    if before.output.name_template != s.profile.output.name_template && !s.name_manual {
+        reset_name(ui, s);
+    }
+    // Turning OCR on (or switching engine) should cover pages already scanned.
+    if s.profile.ocr != before.ocr {
+        for e in &mut s.entries {
+            if let Some(p) = &mut e.page
+                && (s.profile.ocr.engine != before.ocr.engine || s.profile.ocr.languages != before.ocr.languages)
+            {
+                p.ocr = None;
+            }
+        }
+        queue_missing_ocr(ui, s);
+    }
+    ui.set_llm_can_load(s.profile.naming.llm_api != LlmApi::OpenAi);
+    // Switching the AI on: fetch the model list so the dropdown is ready.
+    if s.profile.naming.use_llm && !before.naming.use_llm {
+        refresh_llm_models(ui, s);
+    }
+}
+
+/// Ask the naming server for its models and fill the dropdown. The current
+/// model stays selectable even if the server doesn't list it (e.g. it's
+/// down right now), so a refresh never silently changes the setting.
+fn refresh_llm_models(ui: &AppWindow, s: &mut State) {
+    let naming = s.profile.naming.clone();
+    if !naming.use_llm {
+        return;
+    }
+    s.llm_list_generation += 1;
+    let generation = s.llm_list_generation;
+    ui.set_llm_listing(true);
+    std::thread::spawn(move || {
+        let client = llm::Client::new(naming.llm_api, &naming.llm_endpoint);
+        let result = client.list_models();
+        let lmstudio_hint = naming.llm_api == LlmApi::OpenAi && result.is_ok() && client.looks_like_lmstudio();
+        post(move |ui, s| {
+            if generation != s.llm_list_generation {
+                return;
+            }
+            ui.set_llm_listing(false);
+            let current = s.profile.naming.llm_model.clone();
+            let (mut models, status) = match result {
+                Ok(models) => {
+                    let loaded = models.iter().filter(|m| m.loaded == Some(true)).count();
+                    let status = match (models.len(), naming.llm_api) {
+                        (0, _) => "The server lists no models.".to_string(),
+                        (n, LlmApi::OpenAi) => format!("{n} model{}", if n == 1 { "" } else { "s" }),
+                        (n, _) => format!("{n} model{}, {loaded} loaded (●)", if n == 1 { "" } else { "s" }),
+                    };
+                    (models, status)
+                }
+                Err(e) => (Vec::new(), format!("Can't list models: {e:#}")),
+            };
+            // A short name the server also accepts ("tiny-4b" for "acme/tiny-4b") becomes
+            // the full id, so the dropdown shows it and loading works.
+            let current = match llm::find_model(&models, &current) {
+                Some(m) if m.id != current => {
+                    ui.set_llm_model(m.id.clone().into());
+                    let id = m.id.clone();
+                    s.profile.naming.llm_model = id.clone();
+                    s.config.upsert(s.profile.clone());
+                    let _ = s.config.save();
+                    id
+                }
+                _ => current,
+            };
+            if !current.is_empty() && !models.is_empty() && llm::find_model(&models, &current).is_none() {
+                models.insert(
+                    0,
+                    llm::ModelInfo {
+                        id: current.clone(),
+                        name: Some(format!("{current} (not on this server)")),
+                        loaded: None,
+                        vision: None,
+                        size_bytes: None,
+                        reasoning: false,
+                    },
+                );
+            }
+            ui.set_llm_model_names(strings(models.iter().map(|m| m.label())));
+            ui.set_llm_model_index(models.iter().position(|m| m.id == current).unwrap_or(0) as i32);
+            let status = if lmstudio_hint {
+                format!(
+                    "{status}. This is LM Studio: choose it as the server type to see which models are loaded and load them."
+                )
+            } else {
+                status
+            };
+            ui.set_llm_models_status(status.into());
+            s.llm_models = models;
+            // Nothing chosen yet: take the first (loaded models sort first).
+            if current.is_empty()
+                && let Some(first) = s.llm_models.first()
+            {
+                ui.set_llm_model(first.id.clone().into());
+                settings_changed(ui, s);
+            }
+        });
     });
 }
 
@@ -588,7 +751,10 @@ fn apply_profile(ui: &AppWindow, s: &mut State) {
     ui.set_after_save_command(p.output.after_save_command.clone().into());
     ui.set_suggest_names(p.naming.suggest);
     ui.set_use_llm(p.naming.use_llm);
-    ui.set_llm_api_index(if p.naming.llm_api == LlmApi::OpenAi { 1 } else { 0 });
+    ui.set_llm_api_index(LlmApi::ALL.iter().position(|&a| a == p.naming.llm_api).unwrap_or(0) as i32);
+    ui.set_llm_input_index(LlmInput::ALL.iter().position(|&i| i == p.naming.llm_input).unwrap_or(0) as i32);
+    ui.set_llm_auto_load(p.naming.llm_auto_load);
+    ui.set_llm_can_load(p.naming.llm_api != LlmApi::OpenAi);
     ui.set_llm_endpoint(p.naming.llm_endpoint.clone().into());
     ui.set_llm_model(p.naming.llm_model.clone().into());
 }
@@ -624,7 +790,9 @@ fn read_profile(ui: &AppWindow, s: &State) -> Profile {
     p.output.after_save_command = ui.get_after_save_command().to_string();
     p.naming.suggest = ui.get_suggest_names();
     p.naming.use_llm = ui.get_use_llm();
-    p.naming.llm_api = if ui.get_llm_api_index() == 1 { LlmApi::OpenAi } else { LlmApi::Ollama };
+    p.naming.llm_api = LlmApi::ALL[pick(ui.get_llm_api_index(), LlmApi::ALL.len())];
+    p.naming.llm_input = LlmInput::ALL[pick(ui.get_llm_input_index(), LlmInput::ALL.len())];
+    p.naming.llm_auto_load = ui.get_llm_auto_load();
     p.naming.llm_endpoint = ui.get_llm_endpoint().trim().to_string();
     p.naming.llm_model = ui.get_llm_model().trim().to_string();
     p

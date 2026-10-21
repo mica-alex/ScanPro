@@ -120,12 +120,57 @@ impl Default for OcrSettings {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum LlmApi {
-    /// Ollama's native `/api/generate`.
+    /// Ollama's native API.
     #[default]
     Ollama,
-    /// Any OpenAI-compatible `/v1/chat/completions` (LM Studio, llama.cpp
-    /// server, LocalAI, vLLM…).
+    /// LM Studio: OpenAI-style chat plus its own API for listing models
+    /// with their state and loading them.
+    LmStudio,
+    /// Any OpenAI-compatible `/v1/chat/completions` (llama.cpp server,
+    /// LocalAI, vLLM…).
     OpenAi,
+}
+
+impl LlmApi {
+    pub const ALL: [LlmApi; 3] = [LlmApi::Ollama, LlmApi::LmStudio, LlmApi::OpenAi];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            LlmApi::Ollama => "Ollama",
+            LlmApi::LmStudio => "LM Studio",
+            LlmApi::OpenAi => "OpenAI-compatible (llama.cpp, LocalAI, vLLM…)",
+        }
+    }
+}
+
+/// What the model is given to name a document from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum LlmInput {
+    /// The OCR text. Fastest, works with every model.
+    #[default]
+    Text,
+    /// The OCR text plus a picture of page 1 (vision models): logos and
+    /// layout help with letterheads the OCR reads poorly.
+    TextAndImage,
+    /// Only the picture of page 1 (vision models).
+    Image,
+}
+
+impl LlmInput {
+    pub const ALL: [LlmInput; 3] = [LlmInput::Text, LlmInput::TextAndImage, LlmInput::Image];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            LlmInput::Text => "OCR text (fastest)",
+            LlmInput::TextAndImage => "Page image + OCR text (vision models)",
+            LlmInput::Image => "Page image only (vision models)",
+        }
+    }
+
+    pub fn wants_image(self) -> bool {
+        self != LlmInput::Text
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -139,6 +184,10 @@ pub struct NamingSettings {
     pub llm_api: LlmApi,
     pub llm_endpoint: String,
     pub llm_model: String,
+    pub llm_input: LlmInput,
+    /// Load the model through the server's API when it isn't loaded
+    /// (Ollama and LM Studio).
+    pub llm_auto_load: bool,
 }
 
 impl Default for NamingSettings {
@@ -149,6 +198,8 @@ impl Default for NamingSettings {
             llm_api: LlmApi::Ollama,
             llm_endpoint: "http://localhost:11434".into(),
             llm_model: "llama3.2".into(),
+            llm_input: LlmInput::Text,
+            llm_auto_load: true,
         }
     }
 }

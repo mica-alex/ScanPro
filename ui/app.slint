@@ -230,6 +230,18 @@ export component AppWindow inherits Window {
     in-out property <int> llm-api-index;
     in-out property <string> llm-endpoint;
     in-out property <string> llm-model;
+    // Models the server reported (labels), and which one is selected.
+    in property <[string]> llm-model-names;
+    in-out property <int> llm-model-index;
+    in property <bool> llm-listing;
+    // "8 models, 1 loaded" or why the list is empty.
+    in property <string> llm-models-status;
+    in property <[string]> llm-input-names;
+    in-out property <int> llm-input-index;
+    in-out property <bool> llm-auto-load;
+    // The server type can load models (Ollama, LM Studio).
+    in property <bool> llm-can-load;
+    in property <bool> llm-busy;
     in property <bool> suggesting;
 
     // ─── Pages & state ────────────────────────────────────────────────────
@@ -275,6 +287,10 @@ export component AppWindow inherits Window {
     callback reveal-last();
     callback save();
     callback test-llm();
+    callback llm-api-changed();
+    callback refresh-llm-models();
+    callback llm-model-selected(int);
+    callback load-llm-model();
 
     property <bool> has-selection: root.selected >= 0 && root.selected < root.pages.length;
     property <bool> selected-landscape: root.has-selection && root.pages[root.selected].aspect > 1.0;
@@ -506,17 +522,60 @@ export component AppWindow inherits Window {
                                     Caption { text: "Works with Ollama, LM Studio, llama.cpp or any OpenAI-compatible server on your machine. Falls back to the built-in suggestions if it isn't running."; }
                                     Labeled {
                                         label: "Server type";
-                                        ComboBox { model: root.llm-api-names; current-index <=> root.llm-api-index; selected => { root.settings-changed(); } }
+                                        ComboBox { model: root.llm-api-names; current-index <=> root.llm-api-index; selected => { root.llm-api-changed(); } }
                                     }
                                     Labeled {
                                         label: "Address";
-                                        LineEdit { text <=> root.llm-endpoint; edited => { root.settings-changed(); } }
+                                        LineEdit {
+                                            text <=> root.llm-endpoint;
+                                            edited => { root.settings-changed(); }
+                                            accepted => { root.refresh-llm-models(); }
+                                        }
                                     }
                                     Labeled {
                                         label: "Model";
-                                        LineEdit { text <=> root.llm-model; edited => { root.settings-changed(); } }
+                                        HorizontalLayout {
+                                            spacing: 6px;
+                                            if root.llm-model-names.length > 0: ComboBox {
+                                                horizontal-stretch: 1;
+                                                model: root.llm-model-names;
+                                                current-index <=> root.llm-model-index;
+                                                selected(_) => { root.llm-model-selected(self.current-index); }
+                                            }
+                                            // No list from the server: type the model name.
+                                            if root.llm-model-names.length == 0: LineEdit {
+                                                horizontal-stretch: 1;
+                                                placeholder-text: "Model name";
+                                                text <=> root.llm-model;
+                                                edited => { root.settings-changed(); }
+                                            }
+                                            Button {
+                                                text: root.llm-listing ? "…" : "↻";
+                                                enabled: !root.llm-listing;
+                                                clicked => { root.refresh-llm-models(); }
+                                            }
+                                        }
+                                        Caption { text: root.llm-models-status; }
                                     }
-                                    Button { text: "Test connection"; clicked => { root.test-llm(); } }
+                                    Labeled {
+                                        label: "The model reads";
+                                        ComboBox { model: root.llm-input-names; current-index <=> root.llm-input-index; selected => { root.settings-changed(); } }
+                                        Caption {
+                                            text: root.llm-input-index == 0
+                                                ? "The recognized text only: fastest, and works with every model."
+                                                : "Page 1 is sent as a picture, which helps with logos and letterheads. Only vision models can use it; others get the text instead.";
+                                        }
+                                    }
+                                    if root.llm-can-load: Switch {
+                                        text: "Load the model if it isn't loaded";
+                                        checked <=> root.llm-auto-load;
+                                        toggled => { root.settings-changed(); }
+                                    }
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        Button { text: "Test"; enabled: !root.llm-busy; clicked => { root.test-llm(); } }
+                                        if root.llm-can-load: Button { text: "Load now"; enabled: !root.llm-busy; clicked => { root.load-llm-model(); } }
+                                    }
                                 }
                             }
                         }

@@ -17,8 +17,13 @@ scanner, on macOS, Windows and Linux.
   re-compression.
 - **Suggested file names.** "2026-09-14 Northwind Traders Invoice" is built
   from the document's own date, sender and type, all worked out on your
-  computer. You can optionally ask a local AI model instead (Ollama, LM
-  Studio, llama.cpp…).
+  computer. You can optionally ask a local AI model instead, through Ollama,
+  LM Studio or any OpenAI-compatible server:
+  - pick the model from a list the server provides, which shows which models
+    are loaded and which can see images;
+  - ScanPro can load the model for you if it isn't loaded;
+  - choose what the model reads: the OCR text (fastest), or a picture of
+    page 1 with or without the text, for vision models.
 - **Fits how you work.** Named profiles cover device, scan settings, OCR,
   format, output folder and name template. You can:
   - pick a save folder and a naming template (`{type}/{doc_date} {title}`

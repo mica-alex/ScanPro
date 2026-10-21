@@ -20,14 +20,13 @@
 
 use std::path::PathBuf;
 use std::sync::LazyLock;
-use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use jiff::civil::Date;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::config::{LlmApi, NamingSettings};
+use crate::config::NamingSettings;
 use crate::ocr::OcrPage;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -100,12 +99,19 @@ pub fn sanitize(part: &str) -> String {
 }
 
 /// Suggest a name for the document. Uses the LLM when configured and
-/// reachable, the heuristics otherwise.
-pub fn suggest(pages: &[&OcrPage], settings: &NamingSettings) -> Option<Suggestion> {
+/// reachable, the heuristics otherwise. `page_image` is page 1 as a JPEG,
+/// for vision models (see [`crate::config::LlmInput`]).
+pub fn suggest(pages: &[&OcrPage], settings: &NamingSettings, page_image: Option<&[u8]>) -> Option<Suggestion> {
     let heuristic = suggest_heuristic(pages);
     if settings.use_llm {
-        match suggest_llm(pages, settings) {
-            Ok(mut s) => {
+        match suggest_llm(pages, settings, page_image, heuristic.as_ref()) {
+            Ok((mut s, stats)) => {
+                log::info!(
+                    "named by {} in {:.1}s (+{:.1}s loading)",
+                    settings.llm_model,
+                    stats.answer_secs,
+                    stats.load_secs
+                );
                 // The model is good at titles, less so at dates; keep a date
                 // the heuristics found when the model didn't give one.
                 if s.doc_date.is_none() {
@@ -395,9 +401,35 @@ pub fn suggest_heuristic(pages: &[&OcrPage]) -> Option<Suggestion> {
 
 // ─── Local LLM ─────────────────────────────────────────────────────────────
 
-const PROMPT: &str = "You file scanned documents. From the OCR text below, reply with ONLY a JSON object: \
-{\"title\": sender or subject in 1-5 words, \"type\": document type in 1-2 words (e.g. Invoice, Statement, Letter), \
-\"date\": the document's own date as YYYY-MM-DD or null, \"name\": a concise file name of 2-6 words without date or extension}.\n\nOCR text:\n";
+const SYSTEM_PROMPT: &str = "You name scanned documents so they can be filed and found again. \
+You reply with a single JSON object and nothing else.";
+
+/// The instructions. The example is invented; never put real data here.
+const RULES: &str = r#"Suggest a file name for this scanned document.
+
+Fields:
+- "title": who issued or sent the document (company, shop, clinic, bank, agency); if there is none, its subject. 1-5 words. Never the recipient's or patient's name.
+- "type": the kind of document in 1-2 words, e.g. Receipt, Invoice, Statement, Bill, Letter, Contract, Tax Form, Pay Stub, Insurance Policy, Medical Receipt.
+- "date": the document's own date (issue, statement or receipt date - not a due date, birth date, or a service date listed in the items) as YYYY-MM-DD, or null if there is none.
+- "name": a short file name, usually "<title> <type>", 2-6 words, Title Case. No date, no file extension, no account/card/member numbers, no personal names.
+
+Example (invented): a page reading "NORTHWIND TRADERS ... INVOICE ... Invoice date: Sept 14, 2026 ... Due date: 10/14/2026 ... Total due $635.50" gives
+{"title": "Northwind Traders", "type": "Invoice", "date": "2026-09-14", "name": "Northwind Traders Invoice"}"#;
+
+/// JSON schema for the reply, enforced by servers that support it.
+fn reply_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "title": { "type": "string" },
+            "type": { "type": "string" },
+            "date": { "type": ["string", "null"] },
+            "name": { "type": "string" },
+        },
+        "required": ["title", "type", "date", "name"],
+        "additionalProperties": false,
+    })
+}
 
 #[derive(Deserialize)]
 struct LlmReply {
@@ -408,32 +440,69 @@ struct LlmReply {
     name: Option<String>,
 }
 
-pub fn suggest_llm(pages: &[&OcrPage], settings: &NamingSettings) -> Result<Suggestion> {
-    let text: String = pages.iter().take(2).map(|p| p.text()).collect::<Vec<_>>().join("\n");
-    let text: String = text.chars().take(4000).collect();
-    let prompt = format!("{PROMPT}{text}");
-    let base = settings.llm_endpoint.trim_end_matches('/');
-    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(90))).build().into();
+/// How a model suggestion went, for status messages.
+#[derive(Clone, Debug, Default)]
+pub struct LlmStats {
+    pub load_secs: f32,
+    pub answer_secs: f32,
+    /// The page image was actually sent (vision mode and a vision model).
+    pub used_image: bool,
+}
 
-    let content = match settings.llm_api {
-        LlmApi::Ollama => {
-            let body = serde_json::json!({ "model": settings.llm_model, "prompt": prompt, "stream": false, "format": "json", "options": { "temperature": 0 } });
-            let reply: serde_json::Value =
-                agent.post(&format!("{base}/api/generate")).send_json(&body)?.body_mut().read_json()?;
-            reply["response"].as_str().context("no response field")?.to_string()
+/// Ask the configured model. `hints` (the heuristic result) is passed along
+/// as "may be wrong" context, which noticeably steadies small models.
+pub fn suggest_llm(
+    pages: &[&OcrPage],
+    settings: &NamingSettings,
+    page_image: Option<&[u8]>,
+    hints: Option<&Suggestion>,
+) -> Result<(Suggestion, LlmStats)> {
+    let client = crate::llm::Client::new(settings.llm_api, &settings.llm_endpoint);
+    let model = settings.llm_model.trim();
+    if model.is_empty() {
+        anyhow::bail!("no model selected");
+    }
+    let models = client.list_models().unwrap_or_default();
+    let info = crate::llm::find_model(&models, model).cloned();
+    let mut stats = LlmStats::default();
+    if settings.llm_auto_load && info.as_ref().is_some_and(|m| m.loaded == Some(false)) {
+        stats.load_secs = client.ensure_loaded(model)?;
+    }
+
+    // Only send the picture to a model that can see; one known to be
+    // text-only gets the text instead, whatever the setting says.
+    let can_see = info.as_ref().and_then(|m| m.vision) != Some(false);
+    let image = page_image.filter(|_| settings.llm_input.wants_image() && can_see);
+    stats.used_image = image.is_some();
+    let with_text = settings.llm_input != crate::config::LlmInput::Image || image.is_none();
+
+    let mut prompt = String::from(RULES);
+    if let Some(h) = hints {
+        let mut parts = Vec::new();
+        if let Some(t) = &h.doc_type {
+            parts.push(format!("likely type: {t}"));
         }
-        LlmApi::OpenAi => {
-            let url = if base.ends_with("/v1") {
-                format!("{base}/chat/completions")
-            } else {
-                format!("{base}/v1/chat/completions")
-            };
-            let body = serde_json::json!({ "model": settings.llm_model, "temperature": 0, "messages": [{ "role": "user", "content": prompt }] });
-            let reply: serde_json::Value = agent.post(&url).send_json(&body)?.body_mut().read_json()?;
-            reply["choices"][0]["message"]["content"].as_str().context("no message content")?.to_string()
+        if let Some(d) = h.doc_date {
+            parts.push(format!("likely date: {d}"));
         }
-    };
-    parse_llm_reply(&content)
+        if !parts.is_empty() {
+            prompt.push_str(&format!("\n\nHints from automatic analysis (may be wrong): {}.", parts.join("; ")));
+        }
+    }
+    if image.is_some() {
+        prompt.push_str("\n\nThe first page is attached as an image.");
+    }
+    if with_text {
+        let text: String = pages.iter().take(2).map(|p| p.text()).collect::<Vec<_>>().join("\n");
+        let text: String = text.chars().take(4000).collect();
+        prompt.push_str(&format!("\n\nOCR text of the document:\n<<<\n{text}\n>>>"));
+    }
+
+    let started = std::time::Instant::now();
+    let reasoning = info.as_ref().is_some_and(|m| m.reasoning);
+    let reply = client.chat_json(model, SYSTEM_PROMPT, &prompt, image, &reply_schema(), reasoning)?;
+    stats.answer_secs = started.elapsed().as_secs_f32();
+    Ok((parse_llm_reply(crate::llm::strip_thinking(&reply))?, stats))
 }
 
 fn parse_llm_reply(content: &str) -> Result<Suggestion> {
@@ -445,7 +514,7 @@ fn parse_llm_reply(content: &str) -> Result<Suggestion> {
     let clean = |s: Option<String>| s.map(|s| sanitize(&s)).filter(|s| !s.is_empty() && s != "null");
     let title = clean(reply.title);
     let doc_type = clean(reply.doc_type);
-    let doc_date = reply.date.and_then(|d| d.parse::<Date>().ok());
+    let doc_date = reply.date.and_then(|d| d.trim().parse::<Date>().ok());
     let name = clean(reply.name)
         .or_else(|| title.clone())
         .or_else(|| doc_type.clone())

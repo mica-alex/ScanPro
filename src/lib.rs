@@ -4,6 +4,7 @@
 pub mod config;
 pub mod export;
 pub mod job;
+pub mod llm;
 pub mod naming;
 pub mod ocr;
 pub mod pipeline;

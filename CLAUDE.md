@@ -57,7 +57,10 @@ use it for manual testing so the real one isn't touched.
     detection, thumbnails, and OCR input.
   - `export.rs`: the PDF (pdf-writer), TIFF, image and text writers.
   - `naming.rs`: the name template language and name suggestions (heuristics
-    or a local LLM).
+    or a local LLM, with the prompt and reply schema).
+  - `llm.rs`: talking to local model servers (Ollama, LM Studio,
+    OpenAI-compatible): list models with loaded/vision state, load on demand,
+    and chat with a JSON-schema reply and optional page image.
   - `config.rs`: `Config` → `Profile`s (scan/processing/OCR/naming/output),
     stored as TOML.
   - `job.rs`: OCR → suggest → destination → export → after-save hooks. The
