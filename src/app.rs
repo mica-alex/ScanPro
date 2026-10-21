@@ -82,6 +82,8 @@ struct State {
     preview_generation: u64,
     ocr_total: usize,
     ocr_done: usize,
+    /// The launch-time OCR warm-up is still running; queued pages wait on it.
+    ocr_warming: bool,
     message: String,
     last_saved: Option<PathBuf>,
 }
@@ -172,6 +174,7 @@ pub fn run(files: Vec<PathBuf>) -> Result<()> {
         preview_generation: 0,
         ocr_total: 0,
         ocr_done: 0,
+        ocr_warming: false,
         message: "Ready".into(),
         last_saved: None,
     };
@@ -191,6 +194,7 @@ pub fn run(files: Vec<PathBuf>) -> Result<()> {
 
     wire(&ui);
     refresh_devices();
+    warm_up_ocr();
     if !files.is_empty() {
         with_state(|ui, s| import(ui, s, files));
     }
@@ -452,6 +456,43 @@ fn wire(ui: &AppWindow) {
                 });
             });
         });
+    });
+}
+
+/// Load the OCR engine and run it once on a small bundled image of text, in
+/// the background at launch. A cold start sometimes takes 10–25 s (macOS
+/// reloads Vision's models — when exactly isn't predictable; ocrs may
+/// download its models), and without this the first scanned pages pay for
+/// it while the user watches.
+fn warm_up_ocr() {
+    let Some(settings) = with_state(|_, s| s.profile.ocr.clone()) else { return };
+    if !settings.enabled {
+        return;
+    }
+    with_state(|_, s| s.ocr_warming = true);
+    ocr_pool().spawn(move || {
+        let done = || {
+            post(|ui, s| {
+                s.ocr_warming = false;
+                update_status(ui, s);
+            })
+        };
+        // Real text, not a synthetic pattern: Vision only loads its
+        // recognition models once it finds something worth reading.
+        let Ok(page) = image::load_from_memory(include_bytes!("../assets/ocr-warmup.png")) else { return done() };
+        let started = std::time::Instant::now();
+        match ocr::shared(settings.engine) {
+            Ok(engine) => match engine.recognize(&page, &settings.languages) {
+                Ok(r) => log::info!(
+                    "OCR warmed up in {:.1}s ({} words)",
+                    started.elapsed().as_secs_f32(),
+                    r.lines.iter().map(|l| l.words.len()).sum::<usize>()
+                ),
+                Err(e) => log::warn!("OCR warm-up failed: {e:#}"),
+            },
+            Err(e) => log::warn!("OCR engine unavailable: {e:#}"),
+        }
+        done();
     });
 }
 
@@ -993,6 +1034,7 @@ fn request_suggestion(ui: &AppWindow, s: &mut State, forced: bool) {
         ..s.profile.clone()
     };
     ui.set_suggesting(true);
+    update_status(ui, s);
     std::thread::spawn(move || {
         // A forced suggestion (button) may come before OCR was ever run.
         if pages.iter().take(2).any(|p| p.ocr.is_none()) {
@@ -1002,6 +1044,7 @@ fn request_suggestion(ui: &AppWindow, s: &mut State, forced: bool) {
         let suggestion = job::suggest(&pages, &profile);
         post(move |ui, s| {
             ui.set_suggesting(false);
+            update_status(ui, s);
             if generation != s.suggest_generation || (s.name_manual && !forced) {
                 return;
             }
@@ -1131,6 +1174,7 @@ fn save(ui: &AppWindow, s: &mut State, automatic: bool) {
 
 fn update_status(ui: &AppWindow, s: &State) {
     let pending = ocr_pending(s);
+    let preparing = processing_count(s);
     let (text, progress) = if s.job.is_some() || s.saving {
         (s.message.clone(), 0.0)
     } else if pending > 0 {
@@ -1148,4 +1192,39 @@ fn update_status(ui: &AppWindow, s: &State) {
     };
     ui.set_status(text.into());
     ui.set_progress(progress);
+
+    // The banner over the pages: everything still in flight, in pipeline
+    // order, so a fast feeder doesn't look finished while work remains.
+    let mut activity = Vec::new();
+    if let Some(job) = &s.job {
+        activity.push(if job.cancel.is_cancelled() {
+            "Stopping the scan…".to_string()
+        } else if job.pages == 0 {
+            "Scanning — waiting for the first page…".to_string()
+        } else {
+            format!("Scanning — page {}", job.pages)
+        });
+    }
+    if preparing > 0 {
+        activity.push(format!("Preparing {preparing} page{}", if preparing == 1 { "" } else { "s" }));
+    }
+    if pending > 0 && s.ocr_warming {
+        activity.push(
+            "Getting text recognition ready — this can take up to ~20 s when it hasn't been used in a while"
+                .to_string(),
+        );
+    } else if pending > 0 {
+        let total = s.ocr_total.max(pending);
+        activity.push(format!("Reading text — {} of {total} done", total - pending));
+    }
+    if ui.get_suggesting() {
+        activity.push("Choosing a name".to_string());
+    }
+    if s.saving {
+        activity.push("Saving…".to_string());
+    }
+    ui.set_activity(activity.join("   ·   ").into());
+    // Determinate only when OCR is the sole thing left to wait for.
+    let ocr_only = s.job.is_none() && preparing == 0 && !s.saving && pending > 0;
+    ui.set_activity_progress(if ocr_only { progress } else { -1.0 });
 }

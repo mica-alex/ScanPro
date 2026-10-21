@@ -89,10 +89,33 @@ component PageCard inherits Rectangle {
             source: root.item.thumb;
             image-fit: contain;
         }
-        if !root.item.ready: Spinner {
-            indeterminate: true;
-            width: 28px;
-            height: 28px;
+        if !root.item.ready: Rectangle {
+            background: Palette.background.with-alpha(0.7);
+            VerticalLayout {
+                alignment: center;
+                spacing: 6px;
+                HorizontalLayout {
+                    alignment: center;
+                    Spinner { indeterminate: true; width: 28px; height: 28px; }
+                }
+                Text {
+                    text: "Processing";
+                    font-size: 11px;
+                    horizontal-alignment: center;
+                    color: Palette.foreground.with-alpha(0.7);
+                }
+            }
+        }
+        // Reading text: dim the page slightly and spin in the corner.
+        if root.item.ready && root.item.ocr == 1: Rectangle {
+            background: Palette.background.with-alpha(0.25);
+            Spinner {
+                x: parent.width - self.width - 6px;
+                y: parent.height - self.height - 6px;
+                indeterminate: true;
+                width: 20px;
+                height: 20px;
+            }
         }
         if root.item.blank: Rectangle {
             background: #ffffffa0;
@@ -116,7 +139,7 @@ component PageCard inherits Rectangle {
             vertical-alignment: center;
             font-weight: 600;
         }
-        if root.item.ocr == 1: Badge { text: "OCR…"; tint: Palette.foreground; y: 3px; }
+        if root.item.ocr == 1: Badge { text: "Reading text…"; tint: Palette.accent-background; y: 3px; }
         if root.item.ocr == 2: Badge { text: "Text"; y: 3px; }
         if root.item.ocr == 3: Badge { text: "No text"; tint: #c0392b; y: 3px; }
     }
@@ -218,6 +241,11 @@ export component AppWindow inherits Window {
     in property <bool> scanning;
     in property <bool> saving;
     in property <string> status;
+    // What's still in flight (scanning, preparing, OCR, naming, saving);
+    // empty when idle. Shown as a banner over the pages.
+    in property <string> activity;
+    // 0–1 when the activity has a known extent, else negative.
+    in property <float> activity-progress: -1;
     in property <float> progress: -1;
     in property <string> last-saved;
 
@@ -522,6 +550,34 @@ export component AppWindow inherits Window {
                     Rectangle { horizontal-stretch: 1; }
                     Button { text: "Import…"; clicked => { root.import-files(); } }
                     Button { text: "Clear all"; enabled: root.pages.length > 0 && !root.scanning; clicked => { root.clear-pages(); } }
+                }
+                if root.activity != "": Rectangle {
+                    height: 40px;
+                    background: Palette.accent-background.with-alpha(0.12);
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        spacing: 10px;
+                        Spinner {
+                            indeterminate: true;
+                            width: 20px;
+                            height: 20px;
+                            y: (parent.height - self.height) / 2;
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: root.activity;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        if root.activity-progress >= 0: ProgressIndicator {
+                            width: 180px;
+                            height: 6px;
+                            y: (parent.height - self.height) / 2;
+                            progress: root.activity-progress;
+                        }
+                    }
                 }
                 HorizontalLayout {
                     vertical-stretch: 1;
