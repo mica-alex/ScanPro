@@ -15,7 +15,7 @@ fn main() -> anyhow::Result<()> {
             attach_console();
             cli::run(command)
         }
-        None => app::run(),
+        None => app::run(args.files),
     }
 }
 

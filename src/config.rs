@@ -107,7 +107,7 @@ pub struct OcrSettings {
     pub engine: EngineKind,
     /// BCP-47 tags in priority order; empty = engine default / auto-detect.
     pub languages: Vec<String>,
-    /// Turn pages that were fed upside down (judged from the OCR result).
+    /// Turn pages fed upside down or sideways upright (judged from the OCR result).
     pub fix_orientation: bool,
 }
 

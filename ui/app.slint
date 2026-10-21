@@ -52,6 +52,17 @@ component PageCard inherits Rectangle {
     in property <bool> selected;
     callback clicked();
     callback double-clicked();
+    // Dragging. `drag-moved` reports how far the pointer is from the point
+    // where the card was grabbed, in the card's *current* coordinates — the
+    // card follows the pointer, so this is the movement since the last event
+    // and the grid adds it up.
+    callback drag-started();
+    callback drag-moved(length, length);
+    callback drag-ended();
+    property <bool> dragging;
+    // A drag ends with a release, which TouchArea also reports as a click;
+    // this swallows that one click.
+    property <bool> suppress-click;
 
     border-radius: 8px;
     background: root.selected ? Palette.accent-background.with-alpha(0.16) : (touch.has-hover ? Palette.foreground.with-alpha(0.05) : transparent);
@@ -111,8 +122,33 @@ component PageCard inherits Rectangle {
     }
 
     touch := TouchArea {
-        clicked => { root.clicked(); }
+        mouse-cursor: root.dragging ? MouseCursor.grabbing : MouseCursor.default;
+        clicked => {
+            if root.suppress-click {
+                root.suppress-click = false;
+            } else {
+                root.clicked();
+            }
+        }
         double-clicked => { root.double-clicked(); }
+        moved => {
+            if !root.dragging && (abs(self.mouse-x - self.pressed-x) > 6px || abs(self.mouse-y - self.pressed-y) > 6px) {
+                root.dragging = true;
+                root.drag-started();
+            }
+            if root.dragging {
+                root.drag-moved(self.mouse-x - self.pressed-x, self.mouse-y - self.pressed-y);
+            }
+        }
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down {
+                root.suppress-click = false;
+            } else if e.kind == PointerEventKind.up && root.dragging {
+                root.dragging = false;
+                root.suppress-click = true;
+                root.drag-ended();
+            }
+        }
     }
 }
 
@@ -200,6 +236,8 @@ export component AppWindow inherits Window {
     callback select-page(int);
     callback rotate-page(int, int);
     callback move-page(int, int);
+    // Drag and drop: move page `from` so it ends up at index `to`.
+    callback move-page-to(int, int);
     callback delete-page(int);
     callback clear-pages();
     callback suggest-name();
@@ -211,6 +249,7 @@ export component AppWindow inherits Window {
     callback test-llm();
 
     property <bool> has-selection: root.selected >= 0 && root.selected < root.pages.length;
+    property <bool> selected-landscape: root.has-selection && root.pages[root.selected].aspect > 1.0;
 
     MenuBar {
         Menu {
@@ -228,6 +267,11 @@ export component AppWindow inherits Window {
             MenuItem { title: "Rotate Left"; enabled: root.has-selection; activated => { root.rotate-page(root.selected, -90); } }
             MenuItem { title: "Rotate Right"; enabled: root.has-selection; activated => { root.rotate-page(root.selected, 90); } }
             MenuItem { title: "Rotate 180°"; enabled: root.has-selection; activated => { root.rotate-page(root.selected, 180); } }
+            MenuItem {
+                title: root.selected-landscape ? "Make Portrait" : "Make Landscape";
+                enabled: root.has-selection;
+                activated => { root.rotate-page(root.selected, root.selected-landscape ? 90 : -90); }
+            }
             MenuSeparator {}
             MenuItem { title: "Move Earlier"; enabled: root.has-selection; activated => { root.move-page(root.selected, -1); } }
             MenuItem { title: "Move Later"; enabled: root.has-selection; activated => { root.move-page(root.selected, 1); } }
@@ -365,7 +409,7 @@ export component AppWindow inherits Window {
                                     label: "Engine";
                                     ComboBox { model: root.engine-names; current-index <=> root.engine-index; selected => { root.settings-changed(); } }
                                 }
-                                if root.ocr-enabled: Switch { text: "Turn upside-down pages"; checked <=> root.fix-orientation; toggled => { root.settings-changed(); } }
+                                if root.ocr-enabled: Switch { text: "Auto-rotate pages (from the text)"; checked <=> root.fix-orientation; toggled => { root.settings-changed(); } }
                                 if root.ocr-enabled: Labeled {
                                     label: "Languages (e.g. en-US, de-DE; blank = automatic)";
                                     LineEdit { text <=> root.ocr-languages; edited => { root.settings-changed(); } }
@@ -462,6 +506,14 @@ export component AppWindow inherits Window {
                     spacing: 6px;
                     Button { text: "↺"; enabled: root.has-selection; clicked => { root.rotate-page(root.selected, -90); } }
                     Button { text: "↻"; enabled: root.has-selection; clicked => { root.rotate-page(root.selected, 90); } }
+                    // Turns the page a quarter turn so it's laid out the
+                    // other way; each page keeps its own orientation, so a
+                    // PDF can mix portrait and landscape pages.
+                    Button {
+                        text: root.selected-landscape ? "Portrait" : "Landscape";
+                        enabled: root.has-selection;
+                        clicked => { root.rotate-page(root.selected, root.selected-landscape ? 90 : -90); }
+                    }
                     Button { text: "◀"; enabled: root.has-selection && root.selected > 0; clicked => { root.move-page(root.selected, -1); } }
                     Button { text: "▶"; enabled: root.has-selection && root.selected < root.pages.length - 1; clicked => { root.move-page(root.selected, 1); } }
                     Button { text: "Rescan page"; enabled: root.has-selection && !root.scanning; clicked => { root.scan(1); } }
@@ -482,15 +534,73 @@ export component AppWindow inherits Window {
                             property <length> inset: (self.visible-width - self.cols * self.cell-w) / 2;
                             content-width: self.visible-width;
                             content-height: max(self.visible-height, ceil(root.pages.length / self.cols) * self.cell-h + 16px);
+                            // Drag state: the page being dragged, how far it has
+                            // moved, and the index it would land at.
+                            property <int> drag-from: -1;
+                            property <length> drag-dx;
+                            property <length> drag-dy;
+                            property <int> drop-index: {
+                                if self.drag-from < 0 { return -1; }
+                                // Slot under the centre of the dragged card.
+                                let cx = self.inset + mod(self.drag-from, self.cols) * self.cell-w + self.cell-w / 2 + self.drag-dx;
+                                let cy = 8px + floor(self.drag-from / self.cols) * self.cell-h + self.cell-h / 2 + self.drag-dy;
+                                let col = clamp(floor((cx - self.inset) / self.cell-w), 0, self.cols - 1);
+                                let row = max(0, floor((cy - 8px) / self.cell-h));
+                                return clamp(row * self.cols + col, 0, root.pages.length - 1);
+                            }
+
                             for page[i] in root.pages: PageCard {
-                                x: grid.inset + mod(i, grid.cols) * grid.cell-w;
-                                y: 8px + floor(i / grid.cols) * grid.cell-h;
+                                property <bool> lifted: i == grid.drag-from;
+                                x: grid.inset + mod(i, grid.cols) * grid.cell-w + (self.lifted ? grid.drag-dx : 0px);
+                                y: 8px + floor(i / grid.cols) * grid.cell-h + (self.lifted ? grid.drag-dy : 0px);
+                                z: self.lifted ? 10 : 0;
+                                opacity: self.lifted ? 0.85 : 1.0;
                                 width: grid.cell-w - 8px;
                                 height: grid.cell-h - 8px;
                                 item: page;
                                 selected: i == root.selected;
                                 clicked => { root.select-page(i); }
                                 double-clicked => { root.select-page(i); root.show-preview = true; }
+                                // Selection waits for the drop: selecting opens the
+                                // preview panel, which would reflow the grid under
+                                // the pointer mid-drag.
+                                drag-started => {
+                                    grid.drag-from = i;
+                                    grid.drag-dx = 0;
+                                    grid.drag-dy = 0;
+                                }
+                                drag-moved(dx, dy) => {
+                                    grid.drag-dx += dx;
+                                    grid.drag-dy += dy;
+                                    // Scroll when dragging past the top or bottom edge.
+                                    let pointer-y = self.y + self.height / 2 + grid.content-y;
+                                    if pointer-y > grid.visible-height - 30px {
+                                        grid.content-y = max(grid.content-y - 12px, grid.visible-height - grid.content-height);
+                                    } else if pointer-y < 30px {
+                                        grid.content-y = min(grid.content-y + 12px, 0px);
+                                    }
+                                }
+                                drag-ended => {
+                                    if grid.drop-index >= 0 && grid.drop-index != grid.drag-from {
+                                        root.move-page-to(grid.drag-from, grid.drop-index);
+                                    } else {
+                                        root.select-page(grid.drag-from);
+                                    }
+                                    grid.drag-from = -1;
+                                }
+                            }
+
+                            // Drop marker: a bar at the edge of the target slot,
+                            // on the side the page will be inserted.
+                            if grid.drag-from >= 0 && grid.drop-index != grid.drag-from: Rectangle {
+                                property <bool> after: grid.drop-index > grid.drag-from;
+                                x: grid.inset + mod(grid.drop-index, grid.cols) * grid.cell-w + (self.after ? grid.cell-w - 6px : -5px);
+                                y: 8px + floor(grid.drop-index / grid.cols) * grid.cell-h + 6px;
+                                z: 5;
+                                width: 3px;
+                                height: grid.cell-h - 20px;
+                                border-radius: 1.5px;
+                                background: Palette.accent-background;
                             }
                         }
                         if root.pages.length == 0: VerticalLayout {

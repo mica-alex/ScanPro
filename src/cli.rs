@@ -18,6 +18,9 @@ use scanpro::scanner::{self, CancelToken, ColorMode, PaperSize, Source};
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
+    /// Images to open in the app as pages (no subcommand).
+    #[arg(value_name = "FILES")]
+    pub files: Vec<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -232,12 +235,31 @@ fn scan(config: &mut Config, args: ScanArgs) -> Result<()> {
         profile.processing.skip_blank = false;
     }
 
-    let device_id = match args.device.clone().or(profile.device.clone()).or(config.last_device.clone()) {
-        Some(id) => id,
-        None => scanner::discover_all().into_iter().next().map(|d| d.id).context("no scanners found")?,
+    let first_found = || scanner::discover_all().into_iter().next().map(|d| d.id).context("no scanners found");
+    let mut device = match args.device.clone() {
+        // An explicit --device must work as given.
+        Some(id) => {
+            eprintln!("Using {id}");
+            scanner::open(&id)?
+        }
+        // A remembered device can go stale: USB addresses like
+        // `epsonds:libusb:001:001` change when the scanner is replugged or
+        // power-cycled. Fall back to the first scanner found.
+        None => match profile.device.clone().or(config.last_device.clone()).map(|id| (scanner::open(&id), id)) {
+            Some((Ok(device), id)) => {
+                eprintln!("Using {id}");
+                device
+            }
+            other => {
+                if let Some((Err(e), id)) = other {
+                    eprintln!("{id} isn't available ({e:#}); looking for scanners…");
+                }
+                let id = first_found()?;
+                eprintln!("Using {id}");
+                scanner::open(&id)?
+            }
+        },
     };
-    eprintln!("Using {device_id}");
-    let mut device = scanner::open(&device_id)?;
     let device_name = device.info().name.clone();
 
     // Ctrl+C cancels the scan so the device gets closed properly — killing

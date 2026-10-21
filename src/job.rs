@@ -34,10 +34,11 @@ pub fn ensure_ocr(pages: &mut [Page], settings: &OcrSettings) -> Result<()> {
     Ok(())
 }
 
-/// OCR one page, fixing its orientation if enabled. Returns the rotation
-/// the result belongs to (which may differ from the page's).
+/// OCR one page, fixing its orientation if enabled and the user hasn't
+/// rotated it by hand. Returns the rotation the result belongs to (which may
+/// differ from the page's).
 pub fn ocr_page(page: &Page, engine: &dyn ocr::OcrEngine, settings: &OcrSettings) -> Result<(u16, ocr::OcrPage)> {
-    if settings.fix_orientation {
+    if settings.fix_orientation && !page.rotation_locked {
         pipeline::run_ocr_oriented(page, engine, &settings.languages)
     } else {
         Ok((page.rotation, pipeline::run_ocr(page, engine, &settings.languages)?))

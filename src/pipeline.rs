@@ -42,6 +42,8 @@ pub struct Page {
     pub rotation: u16,
     /// Detected as blank at scan time. Kept (but flagged) when skipping is off.
     pub blank: bool,
+    /// The user rotated this page by hand; auto-rotation must not undo it.
+    pub rotation_locked: bool,
     /// OCR for the current rotation, once done.
     pub ocr: Option<Arc<OcrPage>>,
 }
@@ -151,6 +153,7 @@ impl PageStore {
             bilevel,
             rotation: 0,
             blank,
+            rotation_locked: false,
             ocr: None,
         };
         Ok((page, image))
@@ -351,9 +354,21 @@ pub fn upright_score(ocr: &OcrPage) -> f32 {
     (in_lines as f32 / words.len() as f32) * direction * (wordlike as f32 / alpha as f32)
 }
 
-/// [`run_ocr`], and when the result looks upside-down, OCR the page turned
-/// 180° too and keep whichever reads better. Returns the rotation the result
-/// belongs to; the caller applies it to the page.
+/// How much readable, upright text an OCR result holds: the upright score
+/// weighted by word count (capped, so one dense page doesn't dominate).
+fn orientation_evidence(ocr: &OcrPage) -> f32 {
+    let words: usize = ocr.lines.iter().map(|l| l.words.len()).sum();
+    upright_score(ocr) * words.min(40) as f32
+}
+
+/// [`run_ocr`], and when the result doesn't look like upright text, try the
+/// page turned 90°, 180° and 270° and keep whichever reads best. Covers pages
+/// fed upside down and landscape pages fed sideways. Returns the rotation
+/// the result belongs to; the caller applies it to the page.
+///
+/// The other orientations are probed on one downscaled copy, so a page that
+/// needs no turning costs nothing extra and one that does costs three quick
+/// probes plus a single full-resolution pass in the winning orientation.
 pub fn run_ocr_oriented(
     page: &Page,
     engine: &dyn crate::ocr::OcrEngine,
@@ -361,20 +376,33 @@ pub fn run_ocr_oriented(
 ) -> Result<(u16, OcrPage)> {
     let first = run_ocr(page, engine, languages)?;
     let score = upright_score(&first);
-    // A handful of words isn't enough evidence to second-guess the scanner.
     let word_count: usize = first.lines.iter().map(|l| l.words.len()).sum();
     log::debug!("page {}: upright score {score:.2} over {word_count} words", page.id);
-    if score >= 0.5 || word_count < 8 {
+    if score >= 0.5 && word_count >= 8 {
         return Ok((page.rotation, first));
     }
-    let mut flipped = page.clone();
-    flipped.rotate_by(180);
-    let second = run_ocr(&flipped, engine, languages)?;
-    if upright_score(&second) > score * 1.3 {
-        log::info!("page {} looked upside down; rotated", page.id);
-        Ok((flipped.rotation, second))
-    } else {
-        Ok((page.rotation, first))
+
+    let small = DynamicImage::ImageLuma8(page.load()?.thumbnail(1600, 1600).to_luma8());
+    let current = orientation_evidence(&first);
+    let mut best: Option<(i32, f32)> = None;
+    for turn in [90, 180, 270] {
+        let probe = engine.recognize(&rotate(small.clone(), turn as u16), languages)?;
+        let evidence = orientation_evidence(&probe);
+        log::debug!("page {}: turned {turn}° evidence {evidence:.1} (as scanned {current:.1})", page.id);
+        if best.is_none_or(|(_, e)| evidence > e) {
+            best = Some((turn, evidence));
+        }
+    }
+    // Demand a clear win, and enough text to be sure: a photo or a nearly
+    // blank page should stay as scanned.
+    match best {
+        Some((turn, evidence)) if evidence >= 4.0 && evidence > current * 1.3 => {
+            let mut turned = page.clone();
+            turned.rotate_by(turn);
+            log::info!("page {} was turned {turn}° to read upright", page.id);
+            Ok((turned.rotation, run_ocr(&turned, engine, languages)?))
+        }
+        _ => Ok((page.rotation, first)),
     }
 }
 
@@ -590,6 +618,7 @@ mod tests {
             bilevel: false,
             rotation: 0,
             blank: false,
+            rotation_locked: false,
             ocr: Some(Arc::new(OcrPage::default())),
         };
         p.rotate_by(-90);

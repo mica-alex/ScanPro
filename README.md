@@ -26,8 +26,12 @@ scanner, on macOS, Windows and Linux.
   - save without a dialog, or save as soon as a scan finishes;
   - run a command after each save;
   - do everything from the command line for scripts and automation.
-- **Fix mistakes in place.** Preview any page, rotate it, reorder it, delete
-  it, **rescan just that page**, or **insert a scan after it**.
+- **Fix mistakes in place.** Preview any page, rotate it, delete it, **drag it
+  to reorder**, **rescan just that page**, or **insert a scan after it**.
+- **Portrait and landscape in one PDF.** Each page keeps its own orientation:
+  switch a page between portrait and landscape with one click. Pages fed
+  upside down or sideways are turned upright automatically, based on their
+  text. Rotating a page by hand always wins over the automatic turn.
 - **Native look.** Fluent styling on Windows and Cupertino on macOS. Both
   follow the system's light/dark setting and use the native menu bar and file
   dialogs.
@@ -47,7 +51,7 @@ below):
 
 1. Pick your scanner and a profile. Load paper and press **Scan**.
 2. Pages appear as they're scanned and OCR runs alongside. Select a page to
-   preview, rotate, reorder, rescan or delete it.
+   preview, rotate, rescan or delete it; drag pages to reorder them.
 3. Check the suggested name, choose a format and press **Save**.
 
 For back-to-back documents, turn on **Output → Save without asking** (and
@@ -65,6 +69,7 @@ and `/` makes subfolders.
 ### Command line
 
 ```sh
+scanpro page1.jpg page2.png                      # open the app with these images as pages
 scanpro devices                                  # list scanners
 scanpro scan                                     # scan with the active profile
 scanpro scan -p "Double-sided document" -o ~/Inbox

@@ -419,6 +419,23 @@ mod tests {
     }
 
     #[test]
+    fn mixes_portrait_and_landscape_pages() {
+        let store = PageStore::new().unwrap();
+        let portrait = sample_page(&store, false);
+        let mut landscape = sample_page(&store, false);
+        landscape.rotate_by(-90);
+        let mut landscape_bw = sample_page(&store, true);
+        landscape_bw.rotate_by(90);
+        let opts = ExportOptions { format: OutputFormat::Pdf, jpeg_quality: 80, title: None };
+        let bytes = pdf(&[portrait, landscape, landscape_bw], &opts, false).unwrap();
+        let s = String::from_utf8_lossy(&bytes);
+        // 850×1100 px at 100 dpi is 612×792 pt; turned, 792×612.
+        assert_eq!(s.matches("/MediaBox [0 0 612 792]").count(), 1, "one portrait page");
+        assert_eq!(s.matches("/MediaBox [0 0 792 612]").count(), 2, "two landscape pages");
+        assert_eq!(s.matches("/Width 1100").count(), 2, "landscape images are stored turned");
+    }
+
+    #[test]
     fn image_pdf_has_no_font() {
         let store = PageStore::new().unwrap();
         let pages = vec![sample_page(&store, false)];

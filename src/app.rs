@@ -124,6 +124,17 @@ fn strings<I: IntoIterator<Item = S>, S: Into<SharedString>>(items: I) -> ModelR
     ModelRc::new(VecModel::from(items.into_iter().map(Into::into).collect::<Vec<SharedString>>()))
 }
 
+/// Turn a thumbnail clockwise by `degrees` (any multiple of 90, negative
+/// for counter-clockwise), matching what [`Page::rotate_by`] did to the page.
+fn turn_thumb(t: RgbaImage, degrees: i32) -> RgbaImage {
+    match degrees.rem_euclid(360) {
+        90 => image::imageops::rotate90(&t),
+        180 => image::imageops::rotate180(&t),
+        270 => image::imageops::rotate270(&t),
+        _ => t,
+    }
+}
+
 fn to_image(rgba: &RgbaImage) -> slint::Image {
     slint::Image::from_rgba8(SharedPixelBuffer::clone_from_slice(rgba.as_raw(), rgba.width(), rgba.height()))
 }
@@ -135,7 +146,7 @@ fn device_with<R>(id: &str, f: impl FnOnce(&mut dyn Device) -> Result<R>) -> Res
     // `device` drops (closes) here, before the lock is released.
 }
 
-pub fn run() -> Result<()> {
+pub fn run(files: Vec<PathBuf>) -> Result<()> {
     let ui = AppWindow::new()?;
     let config = Config::load();
     let profile = config.active();
@@ -180,6 +191,9 @@ pub fn run() -> Result<()> {
 
     wire(&ui);
     refresh_devices();
+    if !files.is_empty() {
+        with_state(|ui, s| import(ui, s, files));
+    }
     ui.run()?;
 
     // Window closed: stop any scan and wait for the worker to close the
@@ -314,14 +328,8 @@ fn wire(ui: &AppWindow) {
             let Some(e) = s.entries.get_mut(i as usize) else { return };
             let Some(page) = &mut e.page else { return };
             page.rotate_by(deg);
-            if let Some(t) = e.thumb.take() {
-                e.thumb = Some(match deg.rem_euclid(360) {
-                    90 => image::imageops::rotate90(&t),
-                    180 => image::imageops::rotate180(&t),
-                    270 => image::imageops::rotate270(&t),
-                    _ => t,
-                });
-            }
+            page.rotation_locked = true;
+            e.thumb = e.thumb.take().map(|t| turn_thumb(t, deg));
             e.ocr_state = 0;
             refresh_row(s, i as usize);
             queue_missing_ocr(ui, s);
@@ -339,6 +347,22 @@ fn wire(ui: &AppWindow) {
             refresh_row(s, from);
             refresh_row(s, to as usize);
             ui.set_selected(to as i32);
+        });
+    });
+    ui.on_move_page_to(|from, to| {
+        with_state(|ui, s| {
+            let (from, to) = (from as usize, to as usize);
+            if from >= s.entries.len() || to >= s.entries.len() || from == to {
+                return;
+            }
+            let entry = s.entries.remove(from);
+            s.entries.insert(to, entry);
+            // Rewrite the affected rows in place rather than remove + insert,
+            // so the grid keeps its card elements and doesn't flicker.
+            for i in from.min(to)..=from.max(to) {
+                refresh_row(s, i);
+            }
+            select(ui, s, to as i32);
         });
     });
     ui.on_delete_page(|i| {
@@ -903,7 +927,7 @@ fn ocr_finished(ui: &AppWindow, s: &mut State, key: u64, rotation: u16, result: 
                         // its thumbnail to match the result.
                         if new_rotation != rotation {
                             page.rotate_by(new_rotation as i32 - rotation as i32);
-                            e.thumb = e.thumb.take().map(|t| image::imageops::rotate180(&t));
+                            e.thumb = e.thumb.take().map(|t| turn_thumb(t, new_rotation as i32 - rotation as i32));
                         }
                         page.ocr = Some(Arc::new(r));
                         e.ocr_state = 2;

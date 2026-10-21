@@ -78,6 +78,10 @@ use it for manual testing so the real one isn't touched.
    PDF writer is the only place that flips y.
 2. **Rotation invalidates OCR.** `Page::rotate_by` clears `ocr`. A worker's
    OCR result is only applied if the page's rotation still matches.
+   Auto-rotation (`run_ocr_oriented`) may return a different rotation, and
+   the caller turns the page and its thumbnail to match. A manual rotation
+   sets `Page::rotation_locked`, which turns auto-rotation off for that page;
+   otherwise the re-OCR would undo the user's turn.
 3. **Workers match pages by `key`, never by index.** Pages can be reordered
    or deleted while a scan, OCR or preview is in flight.
 4. **Close scanner devices after every operation.** The epsonds backend
