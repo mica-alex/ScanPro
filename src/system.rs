@@ -40,6 +40,36 @@ pub fn reveal(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Where panics are recorded: `<app data>/crash.log`.
+pub fn crash_log_path() -> Option<std::path::PathBuf> {
+    crate::config::project_dirs().map(|d| d.data_local_dir().join("crash.log"))
+}
+
+/// Append every panic (message, location, thread, backtrace) to
+/// [`crash_log_path`], then run the default hook. Release builds strip
+/// symbols, so without this a crash leaves nothing to go on.
+pub fn install_panic_log() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Some(path) = crash_log_path() {
+            let _ = std::fs::create_dir_all(path.parent().unwrap_or(&path));
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                use std::io::Write;
+                let thread = std::thread::current();
+                let _ = writeln!(
+                    f,
+                    "--- {} ScanPro {} on thread {}\n{info}\n{}\n",
+                    jiff::Timestamp::now(),
+                    env!("CARGO_PKG_VERSION"),
+                    thread.name().unwrap_or("unnamed"),
+                    std::backtrace::Backtrace::force_capture()
+                );
+            }
+        }
+        default_hook(info);
+    }));
+}
+
 /// Quote `s` for the platform shell that [`run_hook`] uses.
 pub fn shell_quote(s: &str) -> String {
     if cfg!(windows) { format!("\"{}\"", s.replace('"', "\"\"")) } else { format!("'{}'", s.replace('\'', r"'\''")) }

@@ -251,12 +251,24 @@ pub fn find_dates(text: &str) -> Vec<(usize, Date)> {
 
 /// The document's own date: the one labelled as such ("Invoice date:",
 /// "Dated"), else the earliest-placed one, and never one labelled "due".
+/// Up to `n` bytes of `text` before byte `pos`, widened to a character
+/// boundary. Cutting at a fixed byte count splits any multi-byte character
+/// ("é", "—", "·") that straddles it, which panics.
+fn window_before(text: &str, pos: usize, n: usize) -> &str {
+    let mut start = pos.saturating_sub(n);
+    while !text.is_char_boundary(start) {
+        start -= 1;
+    }
+    &text[start..pos]
+}
+
 fn best_date(text: &str) -> Option<Date> {
-    let lower = text.to_lowercase();
     find_dates(text)
         .into_iter()
         .map(|(pos, d)| {
-            let before = &lower[pos.saturating_sub(40)..pos];
+            // Lowercase only the window: `pos` indexes `text`, and lowercasing
+            // the whole text can shift byte offsets ("İ" grows to "i̇").
+            let before = window_before(text, pos, 40).to_lowercase();
             let mut score = -(pos as f64) / 2000.0;
             if before.contains("date") || before.contains("dated") || before.contains("issued") {
                 score += 3.0;
@@ -594,6 +606,19 @@ mod tests {
                 Date::new(2025, 2, 7).unwrap(),
             ]
         );
+    }
+
+    #[test]
+    fn multibyte_text_before_a_date_does_not_panic() {
+        // Shift a run of multi-byte characters across the 40-byte look-back
+        // so every alignment gets hit, including a character straddling it.
+        for pad in 0..12 {
+            for filler in ["é", "—", "·", "İ", "€", "日本"] {
+                let text = format!("{}{} Café — Dated: 3/14/26 · total €12", "x".repeat(pad), filler.repeat(15));
+                assert_eq!(best_date(&text), Some(Date::new(2026, 3, 14).unwrap()), "pad {pad} filler {filler}");
+            }
+        }
+        assert_eq!(window_before("aé", 3, 1), "é");
     }
 
     #[test]

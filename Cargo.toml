@@ -96,7 +96,9 @@ tempfile = "3"
 lto = "thin"
 codegen-units = 1
 strip = true
-panic = "abort"
+# Unwind, not abort: a panic in one background task (one odd document) must
+# not take the whole app down, and unwinding still closes an open scanner.
+# The panic hook in `system::install_panic_log` records what happened.
 
 # Image decoding/encoding and OCR are unusably slow unoptimised; keep debug
 # builds of dependencies fast while our own code stays debuggable.

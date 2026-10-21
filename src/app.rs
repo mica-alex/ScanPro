@@ -111,7 +111,23 @@ fn ocr_pool() -> &'static rayon::ThreadPool {
         // OCR engines are internally parallel; half the cores keeps the UI
         // and the scan pipeline responsive.
         let n = std::thread::available_parallelism().map(|n| n.get() / 2).unwrap_or(1).max(1);
-        rayon::ThreadPoolBuilder::new().num_threads(n).thread_name(|i| format!("ocr-{i}")).build().unwrap()
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .thread_name(|i| format!("ocr-{i}"))
+            // Without a handler rayon aborts the process on a panicking task.
+            .panic_handler(|_| {})
+            .build()
+            .unwrap()
+    })
+}
+
+/// Run a background task, turning a panic into an error, so one bad
+/// document can't take the app down or leave the UI waiting forever for a
+/// result. The panic hook has already logged the details.
+fn guarded<T>(what: &str, f: impl FnOnce() -> T) -> Result<T, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|_| {
+        let log = scanpro::system::crash_log_path().map(|p| p.display().to_string()).unwrap_or_default();
+        format!("{what} hit an internal error (details in {log})")
     })
 }
 
@@ -948,26 +964,32 @@ fn start_scan(ui: &AppWindow, s: &mut State, target: Target) {
     let trim = settings.paper == PaperSize::Auto && settings.source.is_feeder();
     let store = s.store.clone();
     std::thread::spawn(move || {
-        let result = device_with(&device.id, |d| {
-            d.scan(&settings, &cancel, &mut |img| {
-                // Hand the pixels to the processing pool and go straight back
-                // to the scanner, so storing/analysing page N overlaps
-                // feeding page N+1.
-                let (tx, rx) = std::sync::mpsc::channel::<u64>();
-                post(move |ui, s| {
-                    let key = page_arrived(ui, s);
-                    let _ = tx.send(key);
-                });
-                let key = rx.recv().unwrap_or(0);
-                let store = store.clone();
-                let processing = processing.clone();
-                rayon::spawn(move || {
-                    let img = if trim { pipeline::trim_feeder_length(img) } else { img };
-                    process_page(store, processing, key, img)
-                });
-                Ok(())
+        // Guarded: a panic mid-scan unwinds through `device_with`, which
+        // still closes the scanner, and the UI gets told the scan ended.
+        let result = guarded("Scanning", || {
+            device_with(&device.id, |d| {
+                d.scan(&settings, &cancel, &mut |img| {
+                    // Hand the pixels to the processing pool and go straight back
+                    // to the scanner, so storing/analysing page N overlaps
+                    // feeding page N+1.
+                    let (tx, rx) = std::sync::mpsc::channel::<u64>();
+                    post(move |ui, s| {
+                        let key = page_arrived(ui, s);
+                        let _ = tx.send(key);
+                    });
+                    let key = rx.recv().unwrap_or(0);
+                    let store = store.clone();
+                    let processing = processing.clone();
+                    rayon::spawn(move || {
+                        let img = if trim { pipeline::trim_feeder_length(img) } else { img };
+                        process_page(store, processing, key, img)
+                    });
+                    Ok(())
+                })
             })
-        });
+        })
+        .map_err(anyhow::Error::msg)
+        .and_then(|r| r);
         post(move |ui, s| scan_finished(ui, s, result));
     });
 }
@@ -995,11 +1017,14 @@ fn page_arrived(ui: &AppWindow, s: &mut State) -> u64 {
 }
 
 fn process_page(store: Arc<PageStore>, processing: scanpro::config::Processing, key: u64, img: scanner::ScannedImage) {
-    let result = store.ingest(img, &processing).map(|(page, pixels)| {
-        let thumb = pipeline::thumbnail(&pixels, page.rotation, THUMB_SIZE);
-        (page, thumb)
-    });
-    post(move |ui, s| page_ready(ui, s, key, result.map_err(|e| format!("{e:#}")), processing.skip_blank));
+    let result = guarded("Processing a page", || {
+        store.ingest(img, &processing).map(|(page, pixels)| {
+            let thumb = pipeline::thumbnail(&pixels, page.rotation, THUMB_SIZE);
+            (page, thumb)
+        })
+    })
+    .and_then(|r| r.map_err(|e| format!("{e:#}")));
+    post(move |ui, s| page_ready(ui, s, key, result, processing.skip_blank));
 }
 
 fn page_ready(ui: &AppWindow, s: &mut State, key: u64, result: Result<(Page, RgbaImage), String>, skip_blank: bool) {
@@ -1111,9 +1136,10 @@ fn queue_missing_ocr(ui: &AppWindow, s: &mut State) {
         s.ocr_total += 1;
         let (page, key, settings) = (page.clone(), e.key, settings.clone());
         ocr_pool().spawn(move || {
-            let result = ocr::shared(settings.engine)
-                .and_then(|engine| job::ocr_page(&page, engine.as_ref(), &settings))
-                .map_err(|e| format!("{e:#}"));
+            let result = guarded("Text recognition", || {
+                ocr::shared(settings.engine).and_then(|engine| job::ocr_page(&page, engine.as_ref(), &settings))
+            })
+            .and_then(|r| r.map_err(|e| format!("{e:#}")));
             post(move |ui, s| ocr_finished(ui, s, key, page.rotation, result));
         });
     }
@@ -1209,10 +1235,18 @@ fn request_suggestion(ui: &AppWindow, s: &mut State, forced: bool) {
             let n = pages.len().min(2);
             let _ = job::ensure_ocr(&mut pages[..n], &profile.ocr);
         }
-        let suggestion = job::suggest(&pages, &profile);
+        let suggestion = guarded("Name suggestion", || job::suggest(&pages, &profile));
         post(move |ui, s| {
             ui.set_suggesting(false);
             update_status(ui, s);
+            let suggestion = match suggestion {
+                Ok(s) => s,
+                Err(e) => {
+                    s.message = e;
+                    update_status(ui, s);
+                    None
+                }
+            };
             if generation != s.suggest_generation || (s.name_manual && !forced) {
                 return;
             }
@@ -1300,12 +1334,14 @@ fn save(ui: &AppWindow, s: &mut State, automatic: bool) {
     update_status(ui, s);
     std::thread::spawn(move || {
         let mut pages = pages;
-        let result = (|| {
+        let result = guarded("Saving", || {
             if profile.ocr.enabled && profile.output.format.needs_ocr() {
                 job::ensure_ocr(&mut pages, &profile.ocr)?;
             }
             job::save(&pages, &profile, &dest, title)
-        })();
+        })
+        .map_err(anyhow::Error::msg)
+        .and_then(|r| r);
         post(move |ui, s| {
             s.saving = false;
             ui.set_saving(false);

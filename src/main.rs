@@ -9,6 +9,10 @@ use clap::Parser;
 
 fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("scanpro=info")).init();
+    scanpro::system::install_panic_log();
+    // rayon aborts the process when a spawned task panics unless the pool
+    // has a handler; the panic hook has already logged it, so just carry on.
+    let _ = rayon::ThreadPoolBuilder::new().panic_handler(|_| {}).build_global();
     let args = cli::Cli::parse();
     match args.command {
         Some(command) => {
